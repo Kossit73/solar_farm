@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .metrics import irr, npv, payback_period
-from .schemas import Assumptions, DebtFacility
+from .schemas import Assumptions, DebtFacility, InventoryPayableSettings, ReceivableSettings
 
 
 @dataclass
@@ -40,8 +40,7 @@ class SolarFarmFinancialModel:
         variable_opex = self._compute_variable_opex(energy)
         capex, depreciation = self._compute_capex_and_depreciation()
         debt_schedule = self._compute_debt_schedule()
-
-        tax_rate = self.assumptions.global_assumptions.tax.income_tax_rate
+        tax_rate_series = self._tax_rate_series()
 
         monthly["energy_mwh"] = energy
         monthly = monthly.join(revenue)
@@ -51,21 +50,30 @@ class SolarFarmFinancialModel:
         monthly["capex"] = capex
         monthly["depreciation"] = depreciation
         monthly = monthly.join(debt_schedule)
-
         monthly["revenue_total"] = monthly.filter(like="revenue_").sum(axis=1)
         monthly["ebitda"] = monthly["revenue_total"] - monthly["total_opex"]
         monthly["ebit"] = monthly["ebitda"] - monthly["depreciation"]
 
+        monthly["tax_rate"] = tax_rate_series
+
+        working_capital = self._compute_working_capital(monthly)
+        monthly = monthly.join(working_capital)
+
         monthly["taxable_income"] = (monthly["ebit"] - monthly["debt_interest"]).clip(lower=0)
-        monthly["tax_payment"] = monthly["taxable_income"] * tax_rate
-        monthly["net_income"] = monthly["ebit"] - monthly["debt_interest"] - monthly["tax_payment"]
+        monthly["tax_payment"] = monthly["taxable_income"] * monthly["tax_rate"]
+        monthly["net_income"] = (
+            monthly["ebit"] - monthly["debt_interest"] - monthly["tax_payment"]
+        )
 
         monthly["fcff"] = (
-            monthly["ebit"] * (1 - tax_rate) + monthly["depreciation"] - monthly["capex"]
+            monthly["ebit"] * (1 - monthly["tax_rate"])
+            + monthly["depreciation"]
+            - monthly["capex"]
+            - monthly["delta_working_capital"]
         )
         monthly["debt_free_cash_flow"] = (
             monthly["fcff"]
-            - monthly["debt_interest"] * (1 - tax_rate)
+            - monthly["debt_interest"] * (1 - monthly["tax_rate"])
             - monthly["debt_principal"]
             + monthly["debt_draw"]
         )
@@ -195,6 +203,87 @@ class SolarFarmFinancialModel:
 
         return schedule
 
+    # ------------------------------------------------------------------
+    def _tax_rate_series(self) -> pd.Series:
+        base_rate = self.assumptions.global_assumptions.tax.income_tax_rate
+        schedule = sorted(self.assumptions.tax_schedule, key=lambda item: item.year)
+        rates = []
+        current_rate = base_rate
+        schedule_index = 0
+
+        for ts in self._timeline:
+            year = ts.year
+            while schedule_index < len(schedule) and schedule[schedule_index].year <= year:
+                current_rate = schedule[schedule_index].tax_rate
+                schedule_index += 1
+            rates.append(current_rate)
+
+        return pd.Series(rates, index=self._timeline, name="tax_rate")
+
+    def _compute_working_capital(self, monthly: pd.DataFrame) -> pd.DataFrame:
+        receivable_map: Dict[int, ReceivableSettings] = {
+            cfg.year: cfg for cfg in self.assumptions.receivable_settings
+        }
+        inventory_map: Dict[int, InventoryPayableSettings] = {
+            cfg.year: cfg for cfg in self.assumptions.inventory_settings
+        }
+
+        last_receivable = None
+        last_inventory = None
+
+        records = []
+        for ts, revenue, opex in zip(
+            self._timeline, monthly["revenue_total"].values, monthly["total_opex"].values
+        ):
+            receivable_cfg = receivable_map.get(ts.year, last_receivable)
+            if receivable_cfg is None and receivable_map:
+                receivable_cfg = receivable_map[min(receivable_map)]
+            last_receivable = receivable_cfg
+
+            inventory_cfg = inventory_map.get(ts.year, last_inventory)
+            if inventory_cfg is None and inventory_map:
+                inventory_cfg = inventory_map[min(inventory_map)]
+            last_inventory = inventory_cfg
+
+            if receivable_cfg:
+                denom = max(1.0, receivable_cfg.days_in_year / 12.0)
+                accounts_receivable = revenue * (receivable_cfg.receivable_days / denom)
+                prepaid = opex * (receivable_cfg.prepaid_expense_days / denom)
+                other_assets = opex * (receivable_cfg.other_asset_days / denom)
+            else:
+                accounts_receivable = 0.0
+                prepaid = 0.0
+                other_assets = 0.0
+
+            if inventory_cfg:
+                denom_inv = max(1.0, inventory_cfg.days_in_year / 12.0)
+                inventory_balance = opex * (inventory_cfg.inventory_days / denom_inv)
+                accounts_payable = opex * (inventory_cfg.accounts_payable_days / denom_inv)
+            else:
+                inventory_balance = 0.0
+                accounts_payable = 0.0
+
+            working_capital = (
+                accounts_receivable + prepaid + other_assets + inventory_balance - accounts_payable
+            )
+
+            records.append(
+                {
+                    "accounts_receivable": accounts_receivable,
+                    "prepaid_expenses": prepaid,
+                    "other_current_assets": other_assets,
+                    "inventory_balance": inventory_balance,
+                    "accounts_payable": accounts_payable,
+                    "working_capital": working_capital,
+                }
+            )
+
+        working_capital_df = pd.DataFrame(records, index=self._timeline)
+        working_capital_df["delta_working_capital"] = working_capital_df["working_capital"].diff().fillna(
+            working_capital_df["working_capital"]
+        )
+        return working_capital_df
+
     @staticmethod
     def _level_payment(balance: float, periodic_rate: float, periods: int) -> float:
         """Compute the constant payment needed to amortize a loan.
@@ -295,6 +384,12 @@ class SolarFarmFinancialModel:
                 "net_income": "sum",
                 "fcff": "sum",
                 "equity_cash_flow": "sum",
+                "capex": "sum",
+                "depreciation": "sum",
+                "debt_interest": "sum",
+                "debt_principal": "sum",
+                "debt_draw": "sum",
+                "delta_working_capital": "sum",
             }
         )
         annual.index = annual.index.year

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
@@ -14,7 +15,16 @@ import streamlit as st
 from solar_farm_financial_model.data_loader import load_assumptions
 from solar_farm_financial_model.model import ModelOutputs, SolarFarmFinancialModel
 from solar_farm_financial_model.reporting import build_summary_report
-from solar_farm_financial_model.schemas import Assumptions
+from solar_farm_financial_model.schemas import (
+    Assumptions,
+    CapexItem,
+    DebtFacility,
+    FixedOpexItem,
+    InventoryPayableSettings,
+    ReceivableSettings,
+    TaxRateSchedule,
+    VariableOpexItem,
+)
 
 
 MetricLabels = {
@@ -32,10 +42,41 @@ def _run_model(
     excel_bytes: bytes | None,
     override_items: Tuple[Tuple[str, float | bool], ...],
     seasonality_rows: Tuple[Tuple[str, float], ...],
+    labour_rows: Tuple[Tuple[object, ...], ...],
+    cost_rows: Tuple[Tuple[object, ...], ...],
+    receivable_rows: Tuple[Tuple[object, ...], ...],
+    inventory_rows: Tuple[Tuple[object, ...], ...],
+    fixed_asset_rows: Tuple[Tuple[object, ...], ...],
+    loan_rows: Tuple[Tuple[object, ...], ...],
+    tax_rows: Tuple[Tuple[object, ...], ...],
+    inflation_rows: Tuple[Tuple[object, ...], ...],
+    risk_rows: Tuple[Tuple[object, ...], ...],
 ) -> Tuple[ModelOutputs, Dict[str, pd.DataFrame], Assumptions]:
     """Execute the financial model with optional overrides and return outputs."""
 
     overrides = dict(override_items)
+    seasonality_list = _rows_from_tuple(seasonality_rows, ("month", "share"))
+    labour_list = _rows_from_tuple(labour_rows, ("role", "annual_cost"))
+    cost_list = _rows_from_tuple(cost_rows, ("product", "fixed_cost", "variable_cost"))
+    receivable_list = _rows_from_tuple(
+        receivable_rows,
+        ("year", "days_in_year", "receivable_days", "prepaid_expense_days", "other_asset_days"),
+    )
+    inventory_list = _rows_from_tuple(
+        inventory_rows,
+        ("year", "days_in_year", "inventory_days", "accounts_payable_days"),
+    )
+    fixed_asset_list = _rows_from_tuple(
+        fixed_asset_rows,
+        ("asset_type", "method", "year", "acquisition", "asset_life"),
+    )
+    loan_list = _rows_from_tuple(loan_rows, ("name", "year", "duration_years", "amount", "interest_rate"))
+    tax_list = _rows_from_tuple(tax_rows, ("name", "year", "tax_rate"))
+    inflation_list = _rows_from_tuple(inflation_rows, ("name", "year", "rate"))
+    risk_list = _rows_from_tuple(
+        risk_rows,
+        ("name", "year", "inherent_risk", "climate_risk", "political_risk"),
+    )
     temp_path: Path | None = None
 
     if excel_bytes:
@@ -60,8 +101,8 @@ def _run_model(
     energy.capacity_factor = float(overrides["capacity_factor"])
     energy.degradation_rate = float(overrides["degradation_rate"])
 
-    if seasonality_rows:
-        raw_shares: List[float] = [max(0.0, _coerce_float(share_value)) for _, share_value in seasonality_rows]
+    if seasonality_list:
+        raw_shares: List[float] = [max(0.0, _coerce_float(row.get("share"))) for row in seasonality_list]
         total = sum(raw_shares)
         if total > 0 and len(raw_shares) == 12:
             energy.seasonality = [value / total for value in raw_shares]
@@ -80,6 +121,145 @@ def _run_model(
 
     revenue.rec.initial = float(overrides["rec_rate"])
     revenue.rec.annual_escalation = float(overrides["rec_escalation"])
+
+    start_year = int(overrides.get("start_year", assumptions.global_assumptions.start_date.year))
+    end_year = int(overrides.get("end_year", start_year + assumptions.global_assumptions.forecast_months // 12 - 1))
+    if end_year < start_year:
+        end_year = start_year
+
+    assumptions.global_assumptions.start_date = date(start_year, 1, 1)
+    assumptions.global_assumptions.forecast_months = max(12, (end_year - start_year + 1) * 12)
+
+    assumptions.global_assumptions.tax.income_tax_rate = float(overrides["income_tax_rate"])
+    assumptions.global_assumptions.tax.capital_gains_tax_rate = float(overrides["capital_gains_tax_rate"])
+    assumptions.global_assumptions.distribution.investor_share = float(overrides["investor_share"])
+    assumptions.global_assumptions.distribution.owner_share = float(overrides["owner_share"])
+
+    inflation_rates = [
+        _coerce_float(row.get("rate"))
+        for row in inflation_list
+        if row.get("rate") is not None
+    ]
+    inflation_default = float(np.mean(inflation_rates)) if inflation_rates else 0.02
+
+    fixed_items = list(assumptions.fixed_opex)
+    variable_items = list(assumptions.variable_opex)
+
+    for row in labour_list:
+        role = str(row.get("role", "")).strip()
+        cost = _coerce_float(row.get("annual_cost"))
+        if role and cost > 0:
+            fixed_items.append(FixedOpexItem(name=role, annual_cost=cost, inflation_rate=inflation_default))
+
+    for row in cost_list:
+        product = str(row.get("product", "")).strip()
+        fixed_cost = _coerce_float(row.get("fixed_cost"))
+        variable_cost = _coerce_float(row.get("variable_cost"))
+        if product and fixed_cost > 0:
+            fixed_items.append(
+                FixedOpexItem(name=f"{product} Fixed", annual_cost=fixed_cost, inflation_rate=inflation_default)
+            )
+        if product and variable_cost > 0:
+            variable_items.append(
+                VariableOpexItem(
+                    name=f"{product} Variable",
+                    cost_per_mwh=variable_cost,
+                    escalation_rate=inflation_default,
+                )
+            )
+
+    if fixed_items:
+        assumptions.fixed_opex = tuple(fixed_items)
+    if variable_items:
+        assumptions.variable_opex = tuple(variable_items)
+
+    receivable_settings = [
+        ReceivableSettings(
+            year=int(row.get("year", start_year)),
+            days_in_year=int(row.get("days_in_year", 365)),
+            receivable_days=_coerce_float(row.get("receivable_days")),
+            prepaid_expense_days=_coerce_float(row.get("prepaid_expense_days")),
+            other_asset_days=_coerce_float(row.get("other_asset_days")),
+        )
+        for row in receivable_list
+    ]
+    if receivable_settings:
+        assumptions.receivable_settings = receivable_settings
+
+    inventory_settings = [
+        InventoryPayableSettings(
+            year=int(row.get("year", start_year)),
+            days_in_year=int(row.get("days_in_year", 365)),
+            inventory_days=_coerce_float(row.get("inventory_days")),
+            accounts_payable_days=_coerce_float(row.get("accounts_payable_days")),
+        )
+        for row in inventory_list
+    ]
+    if inventory_settings:
+        assumptions.inventory_settings = inventory_settings
+
+    tax_schedule = [
+        TaxRateSchedule(year=int(row.get("year", start_year)), tax_rate=_coerce_float(row.get("tax_rate")))
+        for row in tax_list
+        if row.get("tax_rate") is not None
+    ]
+    if tax_schedule:
+        assumptions.tax_schedule = tax_schedule
+        assumptions.global_assumptions.tax.income_tax_rate = tax_schedule[0].tax_rate
+
+    capex_items = []
+    for row in fixed_asset_list:
+        amount = _coerce_float(row.get("acquisition"))
+        if amount <= 0:
+            continue
+        name = str(row.get("asset_type", "Asset")) or "Asset"
+        asset_year = int(row.get("year", start_year))
+        asset_life = max(1, int(round(_coerce_float(row.get("asset_life"), 1.0))))
+        months_offset = max(0, (asset_year - start_year) * 12)
+        spend_profile = [0.0] * months_offset + [1.0]
+        capex_items.append(
+            CapexItem(
+                name=name,
+                amount=amount,
+                depreciation_years=asset_life,
+                spend_profile=spend_profile,
+            )
+        )
+    if capex_items:
+        assumptions.capex_items = capex_items
+
+    debt_facilities: List[DebtFacility] = []
+    for row in loan_list:
+        amount = _coerce_float(row.get("amount"))
+        if amount <= 0:
+            continue
+        facility_year = int(row.get("year", start_year))
+        duration_years = max(1, int(round(_coerce_float(row.get("duration_years"), 1.0))))
+        interest_rate = max(0.0, _coerce_float(row.get("interest_rate")))
+        start_month = max(1, (facility_year - start_year) * 12 + 1)
+        debt_facilities.append(
+            DebtFacility(
+                name=str(row.get("name", "Facility")) or "Facility",
+                principal=amount,
+                interest_rate=interest_rate,
+                term_months=duration_years * 12,
+                interest_only_months=0,
+                start_month=start_month,
+            )
+        )
+    if debt_facilities:
+        assumptions.debt_facilities = debt_facilities
+
+    risk_totals = [
+        _coerce_float(row.get("inherent_risk"))
+        + _coerce_float(row.get("climate_risk"))
+        + _coerce_float(row.get("political_risk"))
+        for row in risk_list
+    ]
+    risk_premium = float(np.mean(risk_totals)) if risk_totals else 0.0
+    assumptions.global_assumptions.discount_rate = min(
+        0.99, float(overrides["discount_rate"]) + risk_premium
+    )
 
     model = SolarFarmFinancialModel(assumptions)
     outputs = model.run()
@@ -114,6 +294,14 @@ def _coerce_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _rows_from_tuple(data: Tuple[Tuple[object, ...], ...], fields: Tuple[str, ...]) -> List[Dict[str, object]]:
+    return [dict(zip(fields, row)) for row in data]
+
+
+def _tupleize(rows: List[Dict[str, object]], fields: Tuple[str, ...]) -> Tuple[Tuple[object, ...], ...]:
+    return tuple(tuple(row.get(field) for field in fields) for row in rows)
 
 
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
@@ -176,18 +364,18 @@ SEASONALITY_DEFAULTS = [
 
 
 LABOUR_DEFAULTS = [
-    {"role": "Production Manager", "annual_cost": 1_000.0},
-    {"role": "Production Operators", "annual_cost": 1_000.0},
-    {"role": "Process Engineer", "annual_cost": 1_000.0},
-    {"role": "Process Technician", "annual_cost": 1_000.0},
+    {"role": "Plant Manager", "annual_cost": 95_000.0},
+    {"role": "Field Technicians", "annual_cost": 180_000.0},
+    {"role": "Control Room Operator", "annual_cost": 80_000.0},
+    {"role": "Maintenance Crew", "annual_cost": 150_000.0},
 ]
 
 
 FIXED_VARIABLE_DEFAULTS = [
-    {"product": "Tablets", "fixed_cost": 0.0, "variable_cost": 0.05},
-    {"product": "Capsules", "fixed_cost": 0.0, "variable_cost": 0.065},
-    {"product": "Liquid", "fixed_cost": 0.0, "variable_cost": 1.525},
-    {"product": "Ointment", "fixed_cost": 0.0, "variable_cost": 3.026},
+    {"product": "Operations Support", "fixed_cost": 65_000.0, "variable_cost": 1.75},
+    {"product": "Grid Compliance", "fixed_cost": 40_000.0, "variable_cost": 0.85},
+    {"product": "Vegetation Control", "fixed_cost": 35_000.0, "variable_cost": 0.60},
+    {"product": "Monitoring", "fixed_cost": 25_000.0, "variable_cost": 0.45},
 ]
 
 
@@ -403,7 +591,7 @@ def _render_seasonality_table() -> List[Dict[str, object]]:
     return updated_rows
 
 
-def _render_projection_horizon_section() -> None:
+def _render_projection_horizon_section() -> Tuple[int, int]:
     st.markdown("### Projection Horizon")
     if "projection_start_year" not in st.session_state:
         st.session_state["projection_start_year"] = 2024
@@ -421,13 +609,14 @@ def _render_projection_horizon_section() -> None:
     end_year_options = list(range(start_year + 1, start_year + 21))
     if st.session_state["projection_end_year"] not in end_year_options:
         st.session_state["projection_end_year"] = end_year_options[-1]
-    st.selectbox(
+    end_year = st.selectbox(
         "End Year",
         options=end_year_options,
         index=end_year_options.index(st.session_state["projection_end_year"]),
         key="projection_end_year",
         help="Choose the final year for the projection horizon (up to 20 years).",
     )
+    return start_year, int(end_year)
 
 
 def _render_labour_structure_section() -> None:
@@ -1233,7 +1422,19 @@ def _get_row_value(state_key: str, label: str, default: float | bool, expected_t
         return default
 
 
-def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool], List[Dict[str, object]]]:
+def _render_assumption_controls() -> tuple[
+    bytes | None,
+    Dict[str, float | bool],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
+]:
     """Render the primary assumption inputs and return override values."""
 
     st.subheader("Assumptions")
@@ -1248,7 +1449,7 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
         )
         st.caption("Limit 200MB per file · XLSX, XLSM, XLS")
 
-    _render_projection_horizon_section()
+    start_year, end_year = _render_projection_horizon_section()
     _render_label_value_table("Core Assumptions", "core_table", CORE_ASSUMPTION_DEFAULTS)
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
     _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
@@ -1281,6 +1482,12 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
         "exit_multiple": float(_get_row_value("core_table", "Exit EBITDA Multiple", 5.0, float)),
         "include_terminal": bool(_get_row_value("core_table", "Include Terminal Value", True, bool)),
         "terminal_growth_rate": float(_get_row_value("core_table", "Terminal Growth Rate", 0.02, float)),
+        "income_tax_rate": float(_get_row_value("global_table", "Income Tax Rate", 0.25, float)),
+        "capital_gains_tax_rate": float(
+            _get_row_value("global_table", "Capital Gains Tax Rate", 0.10, float)
+        ),
+        "investor_share": float(_get_row_value("global_table", "Investor Share", 0.95, float)),
+        "owner_share": float(_get_row_value("global_table", "Owner Share", 0.05, float)),
         "capacity_mw": float(_get_row_value("energy_table", "Capacity (MW)", 10.0, float)),
         "capacity_factor": float(_get_row_value("energy_table", "Capacity Factor", 0.145, float)),
         "degradation_rate": float(_get_row_value("energy_table", "Annual Degradation", 0.005, float)),
@@ -1291,9 +1498,51 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
         "merchant_escalation": float(_get_row_value("revenue_table", "Merchant Annual Escalation", 0.015, float)),
         "rec_rate": float(_get_row_value("revenue_table", "Year 1 REC Price ($/MWh)", 40.0, float)),
         "rec_escalation": float(_get_row_value("revenue_table", "REC Annual Escalation", 0.02, float)),
+        "start_year": float(start_year),
+        "end_year": float(end_year),
     }
 
-    return excel_bytes, overrides, seasonality_rows
+    labour_rows = [
+        {
+            "role": str(row.get("role", "")).strip(),
+            "annual_cost": float(row.get("annual_cost", 0.0)),
+        }
+        for row in st.session_state.get("labour_structure", [])
+        if str(row.get("role", "")).strip()
+    ]
+
+    cost_rows = [
+        {
+            "product": str(row.get("product", "")).strip(),
+            "fixed_cost": float(row.get("fixed_cost", 0.0)),
+            "variable_cost": float(row.get("variable_cost", 0.0)),
+        }
+        for row in st.session_state.get("fixed_variable_costs", [])
+        if str(row.get("product", "")).strip()
+    ]
+
+    receivable_rows = copy.deepcopy(st.session_state.get("accounts_receivable", []))
+    inventory_rows = copy.deepcopy(st.session_state.get("inventory_payables", []))
+    fixed_asset_rows = copy.deepcopy(st.session_state.get("fixed_assets_schedule", []))
+    loan_rows = copy.deepcopy(st.session_state.get("loan_schedule", []))
+    tax_rows = copy.deepcopy(st.session_state.get("tax_schedule", []))
+    inflation_rows = copy.deepcopy(st.session_state.get("inflation_schedule", []))
+    risk_rows = copy.deepcopy(st.session_state.get("risk_schedule", []))
+
+    return (
+        excel_bytes,
+        overrides,
+        seasonality_rows,
+        labour_rows,
+        cost_rows,
+        receivable_rows,
+        inventory_rows,
+        fixed_asset_rows,
+        loan_rows,
+        tax_rows,
+        inflation_rows,
+        risk_rows,
+    )
 
 
 def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> None:
@@ -1555,17 +1804,38 @@ def _render_financial_position(outputs: ModelOutputs) -> None:
     net_ppe = (monthly["capex"].cumsum() - monthly["depreciation"].cumsum()).clip(lower=0)
     cash_balance = monthly["equity_cash_flow"].cumsum()
     debt_balance = monthly.get("debt_balance", pd.Series(0.0, index=monthly.index))
+    accounts_receivable = monthly.get("accounts_receivable", pd.Series(0.0, index=monthly.index))
+    prepaid_expenses = monthly.get("prepaid_expenses", pd.Series(0.0, index=monthly.index))
+    other_current_assets = monthly.get("other_current_assets", pd.Series(0.0, index=monthly.index))
+    inventory_balance = monthly.get("inventory_balance", pd.Series(0.0, index=monthly.index))
+    accounts_payable = monthly.get("accounts_payable", pd.Series(0.0, index=monthly.index))
+
+    total_assets = (
+        cash_balance
+        + accounts_receivable
+        + prepaid_expenses
+        + other_current_assets
+        + inventory_balance
+        + net_ppe
+    )
+    total_liabilities = debt_balance + accounts_payable
 
     balance = pd.DataFrame(
         {
             "Cash": cash_balance,
+            "Accounts Receivable": accounts_receivable,
+            "Prepaid Expenses": prepaid_expenses,
+            "Other Current Assets": other_current_assets,
+            "Inventory": inventory_balance,
             "Net PP&E": net_ppe,
-            "Total Assets": cash_balance + net_ppe,
+            "Total Assets": total_assets,
+            "Accounts Payable": accounts_payable,
             "Debt Outstanding": debt_balance,
+            "Total Liabilities": total_liabilities,
         }
     )
-    balance["Equity"] = balance["Total Assets"] - balance["Debt Outstanding"]
-    balance["Total Liabilities & Equity"] = balance["Debt Outstanding"] + balance["Equity"]
+    balance["Equity"] = balance["Total Assets"] - balance["Total Liabilities"]
+    balance["Total Liabilities & Equity"] = balance["Total Liabilities"] + balance["Equity"]
 
     balance_sheet = balance.resample("A").last()
     balance_sheet.index = balance_sheet.index.year
@@ -1578,7 +1848,11 @@ def _render_cash_flow_statement(outputs: ModelOutputs) -> None:
     """Show annual cash flow statement derived from the monthly projection."""
 
     monthly = outputs.monthly_results
-    operating_cf = (monthly["ebitda"] - monthly["tax_payment"] - monthly["debt_interest"]).resample("A").sum()
+    ebitda = monthly["ebitda"].resample("A").sum()
+    taxes = monthly["tax_payment"].resample("A").sum()
+    interest = monthly["debt_interest"].resample("A").sum()
+    working_cap_change = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("A").sum()
+    operating_cf = ebitda - taxes - interest - working_cap_change
     investing_cf = (-monthly["capex"]).resample("A").sum()
     financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("A").sum()
     equity_cf = monthly["equity_cash_flow"].resample("A").sum()
@@ -1589,6 +1863,7 @@ def _render_cash_flow_statement(outputs: ModelOutputs) -> None:
             "Investing Cash Flow": investing_cf,
             "Financing Cash Flow": financing_cf,
             "Equity Cash Flow": equity_cf,
+            "Change in Working Capital": -working_cap_change,
         }
     )
     cash_flow["Net Cash Flow"] = cash_flow[["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow"]].sum(axis=1)
@@ -1817,14 +2092,60 @@ PAGE_OPTIONS = [
 tabs = st.tabs(PAGE_OPTIONS)
 
 with tabs[0]:
-    excel_bytes, override_dict, seasonality_rows = _render_assumption_controls()
+    (
+        excel_bytes,
+        override_dict,
+        seasonality_rows,
+        labour_rows,
+        cost_rows,
+        receivable_rows,
+        inventory_rows,
+        fixed_asset_rows,
+        loan_rows,
+        tax_rows,
+        inflation_rows,
+        risk_rows,
+    ) = _render_assumption_controls()
 
-override_tuple = tuple(sorted(override_dict.items()))
-seasonality_tuple = tuple(
-    (str(row.get("month", "")), _coerce_float(row.get("share", 0.0))) for row in seasonality_rows
+seasonality_tuple = _tupleize(seasonality_rows, ("month", "share"))
+labour_tuple = _tupleize(labour_rows, ("role", "annual_cost"))
+cost_tuple = _tupleize(cost_rows, ("product", "fixed_cost", "variable_cost"))
+receivable_tuple = _tupleize(
+    receivable_rows,
+    ("year", "days_in_year", "receivable_days", "prepaid_expense_days", "other_asset_days"),
+)
+inventory_tuple = _tupleize(
+    inventory_rows,
+    ("year", "days_in_year", "inventory_days", "accounts_payable_days"),
+)
+fixed_asset_tuple = _tupleize(
+    fixed_asset_rows,
+    ("asset_type", "method", "year", "acquisition", "asset_life"),
+)
+loan_tuple = _tupleize(loan_rows, ("name", "year", "duration_years", "amount", "interest_rate"))
+tax_tuple = _tupleize(tax_rows, ("name", "year", "tax_rate"))
+inflation_tuple = _tupleize(inflation_rows, ("name", "year", "rate"))
+risk_tuple = _tupleize(
+    risk_rows,
+    ("name", "year", "inherent_risk", "climate_risk", "political_risk"),
 )
 
-outputs, summary_tables, assumptions = _run_model(excel_bytes, override_tuple, seasonality_tuple)
+override_tuple = tuple(sorted(override_dict.items()))
+
+outputs, summary_tables, assumptions = _run_model(
+    excel_bytes,
+    override_tuple,
+    seasonality_tuple,
+    labour_tuple,
+    cost_tuple,
+    receivable_tuple,
+    inventory_tuple,
+    fixed_asset_tuple,
+    loan_tuple,
+    tax_tuple,
+    inflation_tuple,
+    risk_tuple,
+)
 
 with tabs[0]:
     st.divider()

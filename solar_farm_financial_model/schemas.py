@@ -121,6 +121,35 @@ class DebtFacility:
 
 
 @dataclass
+class ReceivableSettings:
+    """Working capital assumptions for receivables and other current assets."""
+
+    year: int
+    days_in_year: int
+    receivable_days: float
+    prepaid_expense_days: float
+    other_asset_days: float
+
+
+@dataclass
+class InventoryPayableSettings:
+    """Working capital assumptions for inventory and accounts payable."""
+
+    year: int
+    days_in_year: int
+    inventory_days: float
+    accounts_payable_days: float
+
+
+@dataclass
+class TaxRateSchedule:
+    """Explicit tax rate inputs that can vary by fiscal year."""
+
+    year: int
+    tax_rate: float
+
+
+@dataclass
 class DistributionSplit:
     """Equity ownership split between investor and owner."""
 
@@ -170,6 +199,9 @@ class Assumptions:
     fixed_opex: Sequence[FixedOpexItem]
     variable_opex: Sequence[VariableOpexItem]
     debt_facilities: Sequence[DebtFacility]
+    receivable_settings: Sequence[ReceivableSettings] = field(default_factory=list)
+    inventory_settings: Sequence[InventoryPayableSettings] = field(default_factory=list)
+    tax_schedule: Sequence[TaxRateSchedule] = field(default_factory=list)
     terminal_growth_rate: float = 0.0
 
     def to_dict(self) -> Dict[str, object]:
@@ -182,5 +214,8 @@ class Assumptions:
             "fixed_opex": list(self.fixed_opex),
             "variable_opex": list(self.variable_opex),
             "debt": list(self.debt_facilities),
+            "receivables": list(self.receivable_settings),
+            "inventory": list(self.inventory_settings),
+            "tax_schedule": list(self.tax_schedule),
             "terminal_growth_rate": self.terminal_growth_rate,
         }

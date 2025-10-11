@@ -16,10 +16,13 @@ from .schemas import (
     EnergyAssumptions,
     FixedOpexItem,
     GlobalAssumptions,
+    InventoryPayableSettings,
     RateCurve,
+    ReceivableSettings,
     RevenueAssumptions,
     RevenueShare,
     TaxAssumptions,
+    TaxRateSchedule,
     VariableOpexItem,
 )
 
@@ -109,6 +112,27 @@ def _default_assumptions() -> Assumptions:
         )
     ]
 
+    receivable_settings = [
+        ReceivableSettings(
+            year=2025,
+            days_in_year=365,
+            receivable_days=45,
+            prepaid_expense_days=30,
+            other_asset_days=5,
+        )
+    ]
+
+    inventory_settings = [
+        InventoryPayableSettings(
+            year=2025,
+            days_in_year=365,
+            inventory_days=50,
+            accounts_payable_days=45,
+        )
+    ]
+
+    tax_schedule = [TaxRateSchedule(year=2025, tax_rate=tax.income_tax_rate)]
+
     return Assumptions(
         global_assumptions=global_assumptions,
         energy=energy,
@@ -117,6 +141,9 @@ def _default_assumptions() -> Assumptions:
         fixed_opex=fixed_opex,
         variable_opex=variable_opex,
         debt_facilities=debt_facilities,
+        receivable_settings=receivable_settings,
+        inventory_settings=inventory_settings,
+        tax_schedule=tax_schedule,
         terminal_growth_rate=0.02,
     )
 
@@ -139,6 +166,25 @@ def _load_from_excel(excel_path: Path) -> Optional[Assumptions]:
     except Exception:
         return None
 
+    receivable_settings = [
+        ReceivableSettings(
+            year=global_assumptions.start_date.year,
+            days_in_year=365,
+            receivable_days=45,
+            prepaid_expense_days=30,
+            other_asset_days=5,
+        )
+    ]
+    inventory_settings = [
+        InventoryPayableSettings(
+            year=global_assumptions.start_date.year,
+            days_in_year=365,
+            inventory_days=50,
+            accounts_payable_days=45,
+        )
+    ]
+    tax_schedule = [TaxRateSchedule(year=global_assumptions.start_date.year, tax_rate=global_assumptions.tax.income_tax_rate)]
+
     return Assumptions(
         global_assumptions=global_assumptions,
         energy=energy,
@@ -147,6 +193,9 @@ def _load_from_excel(excel_path: Path) -> Optional[Assumptions]:
         fixed_opex=fixed_opex,
         variable_opex=variable_opex,
         debt_facilities=debt_facilities,
+        receivable_settings=receivable_settings,
+        inventory_settings=inventory_settings,
+        tax_schedule=tax_schedule,
         terminal_growth_rate=0.02,
     )
 
