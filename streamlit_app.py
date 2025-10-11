@@ -2047,13 +2047,23 @@ def _render_assumption_controls() -> tuple[
 
 
 def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> None:
-    """Present the core assumptions used to drive the model."""
+    """Present guidance for the Input Landing Page."""
+
+    st.info(
+        "Use the editable tables above to update assumptions. "
+        "Summary snapshots now live on the Key Metrics Dashboard tab."
+    )
+
+
+def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs) -> None:
+    """Display core, global, energy, and seasonality summaries."""
 
     global_cfg = assumptions.global_assumptions
     energy_cfg = assumptions.energy
     metrics = outputs.metrics
 
-    st.header("Core Assumptions")
+    st.header("Assumption Snapshot")
+
     start_timestamp = pd.Timestamp(global_cfg.start_date)
     horizon_months = max(1, int(global_cfg.forecast_months))
     horizon_end = (start_timestamp + pd.DateOffset(months=horizon_months - 1)).date()
@@ -2086,9 +2096,10 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
             ],
         }
     )
+    st.subheader("Core Assumptions")
     st.dataframe(core_df, use_container_width=True, hide_index=True)
 
-    st.header("Global")
+    st.subheader("Global")
     global_col1, global_col2, global_col3 = st.columns(3)
     with global_col1:
         st.metric("Income Tax Rate", _format_percentage(global_cfg.tax.income_tax_rate))
@@ -2098,9 +2109,15 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
         st.metric("Owner Share", _format_percentage(global_cfg.distribution.owner_share))
     with global_col3:
         st.metric("Terminal Growth", _format_percentage(assumptions.terminal_growth_rate))
-        st.metric("Payback", _format_metric("project_payback_months", metrics.get("project_payback_months", float("nan"))))
+        st.metric(
+            "Payback",
+            _format_metric(
+                "project_payback_months",
+                metrics.get("project_payback_months", float("nan")),
+            ),
+        )
 
-    st.header("Energy")
+    st.subheader("Energy")
     energy_cols = st.columns(4)
     energy_cols[0].metric("Capacity (MW)", f"{energy_cfg.capacity_mw:,.2f}")
     energy_cols[1].metric("Capacity Factor", _format_percentage(energy_cfg.capacity_factor))
@@ -2127,7 +2144,9 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
             "Share of Annual Output": assumptions.energy.seasonality,
         }
     )
-    seasonality_df["Share of Annual Output"] = seasonality_df["Share of Annual Output"].apply(_format_percentage)
+    seasonality_df["Share of Annual Output"] = seasonality_df["Share of Annual Output"].apply(
+        _format_percentage
+    )
     st.dataframe(seasonality_df, use_container_width=True, hide_index=True)
 
 
@@ -3691,6 +3710,8 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
     with tab:
         st.caption(projection_caption)
         if page_name == "Key Metrics Dashboard":
+            _render_assumption_snapshot(assumptions, outputs)
+            st.divider()
             st.header("Overview")
             _render_overview(outputs, summary_tables)
             st.header("Revenue & Energy")
