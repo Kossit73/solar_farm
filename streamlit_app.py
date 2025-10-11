@@ -298,6 +298,28 @@ def _coerce_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _coerce_optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _rows_from_tuple(data: Tuple[Tuple[object, ...], ...], fields: Tuple[str, ...]) -> List[Dict[str, object]]:
     return [dict(zip(fields, row)) for row in data]
 
@@ -563,6 +585,61 @@ SENSITIVITY_DEFAULTS: List[Dict[str, object]] = [
 SENSITIVITY_STATE_KEY = "sensitivity_config"
 
 
+GOAL_SEEK_SOURCE_LABELS: Dict[str, str] = {
+    "metrics": "Model Metrics",
+    "income_statement": "Statement of Financial Performance",
+    "cash_flow": "Statement of Cash Flows",
+}
+
+
+GOAL_SEEK_METRIC_OPTIONS: Dict[str, Dict[str, str]] = {
+    "metrics": MetricLabels,
+    "income_statement": {
+        "revenue_total": "Gross Revenue",
+        "total_opex": "Total Operating Expenses",
+        "ebitda": "EBITDA",
+        "ebit": "EBIT",
+        "net_income": "Net Income",
+        "depreciation": "Depreciation",
+    },
+    "cash_flow": {
+        "fcff": "Free Cash Flow to Firm",
+        "equity_cash_flow": "Equity Cash Flow",
+        "debt_draw": "Debt Draws",
+        "debt_principal": "Debt Principal Payments",
+        "debt_interest": "Debt Interest",
+        "capex": "Capital Expenditure",
+        "delta_working_capital": "Change in Working Capital",
+    },
+}
+
+
+GOAL_SEEK_DEFAULTS: List[Dict[str, object]] = [
+    {
+        "id": "goal_seek_npv",
+        "source": "metrics",
+        "metric": "project_npv",
+        "variable": "ppa_rate",
+        "target": "2500000",
+        "year": "2025",
+    },
+    {
+        "id": "goal_seek_income",
+        "source": "income_statement",
+        "metric": "net_income",
+        "variable": "capacity_factor",
+        "target": "1500000",
+        "year": "2026",
+    },
+]
+
+
+GOAL_SEEK_STATE_KEY = "goal_seek_config"
+
+
+GOAL_SEEK_MULTIPLIERS = tuple(float(x) for x in np.linspace(0.5, 1.5, 41))
+
+
 SEASONALITY_DEFAULTS = [
     {"month": "January", "share": 0.05},
     {"month": "February", "share": 0.05},
@@ -635,6 +712,99 @@ FIXED_ASSET_DEFAULTS = [
         "ending_book_value": 2_500_000.0,
     },
 ]
+
+
+SCENARIO_DEFAULTS: List[Dict[str, object]] = [
+    {
+        "id": "scenario_base",
+        "name": "Scenario - base",
+        "inflation_rate": 0.020,
+        "interest_rate": 0.050,
+        "revenue_multiplier": 1.00,
+        "opex_multiplier": 1.00,
+        "capex_multiplier": 1.00,
+        "capacity_multiplier": 1.00,
+    },
+    {
+        "id": "scenario_best",
+        "name": "Scenario - best",
+        "inflation_rate": 0.018,
+        "interest_rate": 0.045,
+        "revenue_multiplier": 1.05,
+        "opex_multiplier": 0.95,
+        "capex_multiplier": 0.95,
+        "capacity_multiplier": 1.05,
+    },
+    {
+        "id": "scenario_worst",
+        "name": "Scenario - worst",
+        "inflation_rate": 0.024,
+        "interest_rate": 0.055,
+        "revenue_multiplier": 0.95,
+        "opex_multiplier": 1.05,
+        "capex_multiplier": 1.05,
+        "capacity_multiplier": 0.95,
+    },
+]
+
+
+SCENARIO_STATE_KEY = "scenario_if_config"
+
+
+SCENARIO_TOOL_SECTIONS = [
+    ("decision_tree", {"label": "Decision Tree Tools", "show_iterate": True}),
+    ("stress_testing", {"label": "Stress Testing", "show_iterate": False}),
+    ("backtesting", {"label": "Backtesting", "show_iterate": True}),
+    ("walk_forward", {"label": "Walk-forward Testing", "show_iterate": True}),
+    ("driver_model", {"label": "Driver-based Modeling", "show_iterate": True}),
+    ("real_options", {"label": "Real Options Analysis (ROA)", "show_iterate": False}),
+]
+
+
+SCENARIO_TOOL_DEFAULTS: Dict[str, Dict[str, object]] = {
+    "decision_tree": {
+        "variables": [
+            {"id": "decision_tree_rev", "variable": "Net Revenue"},
+            {"id": "decision_tree_income", "variable": "Net Income"},
+        ],
+        "iterate": "Capacity factor +/- 5%",
+    },
+    "stress_testing": {
+        "variables": [
+            {"id": "stress_revenue", "variable": "Net Revenue"},
+            {"id": "stress_ebitda", "variable": "EBITDA"},
+        ],
+        "iterate": "",
+    },
+    "backtesting": {
+        "variables": [
+            {"id": "backtesting_revenue", "variable": "Net Revenue"},
+        ],
+        "iterate": "Historic performance window",
+    },
+    "walk_forward": {
+        "variables": [
+            {"id": "walkforward_revenue", "variable": "Net Revenue"},
+        ],
+        "iterate": "Rolling 12-month recalibration",
+    },
+    "driver_model": {
+        "variables": [
+            {"id": "driver_ebitda", "variable": "EBITDA"},
+            {"id": "driver_ebit", "variable": "EBIT"},
+        ],
+        "iterate": "Update quarterly drivers",
+    },
+    "real_options": {
+        "variables": [
+            {"id": "roa_income", "variable": "Net Income"},
+        ],
+        "iterate": "",
+    },
+}
+
+
+SCENARIO_TOOL_STATE_KEY = "scenario_tool_config"
 
 
 LOAN_SCHEDULE_DEFAULTS = [
@@ -2136,14 +2306,39 @@ def _render_sensitivity_configuration() -> List[Dict[str, object]]:
     return st.session_state[SENSITIVITY_STATE_KEY]
 
 
-def _simulate_metrics(base: Assumptions, modifier: Callable[[Assumptions], None]) -> Dict[str, float]:
-    """Clone assumptions, apply a modifier, and return the resulting metrics."""
+def _simulate_outputs(base: Assumptions, modifier: Callable[[Assumptions], None]) -> ModelOutputs:
+    """Clone assumptions, apply a modifier, and return the resulting model outputs."""
 
     scenario = copy.deepcopy(base)
     modifier(scenario)
     scenario_model = SolarFarmFinancialModel(scenario)
-    scenario_outputs = scenario_model.run()
+    return scenario_model.run()
+
+
+def _simulate_metrics(base: Assumptions, modifier: Callable[[Assumptions], None]) -> Dict[str, float]:
+    """Clone assumptions, apply a modifier, and return the resulting metrics."""
+
+    scenario_outputs = _simulate_outputs(base, modifier)
     return scenario_outputs.metrics
+
+
+def _goal_seek_value(outputs: ModelOutputs, source: str, metric: str, year: int | None) -> float:
+    """Extract a numeric value for goal seek comparisons based on the selected source."""
+
+    if source == "metrics":
+        return float(outputs.metrics.get(metric, float("nan")))
+
+    annual = outputs.annual_summary
+    if metric not in annual.columns or annual.empty:
+        return float("nan")
+
+    if year is not None and year in annual.index:
+        return float(annual.at[year, metric])
+
+    if year is None and not annual.empty:
+        return float(annual.iloc[0][metric])
+
+    return float("nan")
 
 
 def _render_sensitivity_analysis(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
@@ -2217,34 +2412,448 @@ def _render_sensitivity_analysis(base_assumptions: Assumptions, outputs: ModelOu
     st.dataframe(sensitivity_df, use_container_width=True)
 
 
-def _render_scenario_analysis(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
-    """Display predefined multi-factor scenarios."""
+def _evaluate_goal_seek_rows(
+    base_assumptions: Assumptions,
+    base_outputs: ModelOutputs,
+    rows: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Evaluate goal seek configurations and return a list of result records."""
 
-    scenarios: Dict[str, Callable[[Assumptions], None]] = {
-        "Base Case": lambda a: None,
-        "Optimistic": lambda a: (
-            setattr(a.revenue.ppa.rate_curve, "initial", a.revenue.ppa.rate_curve.initial * 1.05),
-            setattr(a.energy, "capacity_factor", max(0.01, min(1.0, a.energy.capacity_factor * 1.05))),
-            [setattr(item, "amount", item.amount * 0.95) for item in a.capex_items],
-            [setattr(item, "annual_cost", item.annual_cost * 0.95) for item in a.fixed_opex],
-        ),
-        "Downside": lambda a: (
-            setattr(a.revenue.ppa.rate_curve, "initial", a.revenue.ppa.rate_curve.initial * 0.95),
-            setattr(a.energy, "capacity_factor", max(0.01, min(1.0, a.energy.capacity_factor * 0.95))),
-            [setattr(item, "amount", item.amount * 1.05) for item in a.capex_items],
-            [setattr(item, "annual_cost", item.annual_cost * 1.05) for item in a.fixed_opex],
-        ),
-    }
+    results: List[Dict[str, object]] = []
+    if not rows:
+        return results
 
-    results = []
-    for name, modifier in scenarios.items():
-        if name == "Base Case":
-            metrics = outputs.metrics
-        else:
-            metrics = _simulate_metrics(base_assumptions, modifier)
+    option_keys = list(SENSITIVITY_OPTIONS.keys())
+
+    for row in rows:
+        variable_key = str(row.get("variable", ""))
+        if variable_key not in SENSITIVITY_OPTIONS:
+            continue
+
+        source = str(row.get("source", "metrics"))
+        if source not in GOAL_SEEK_SOURCE_LABELS:
+            source = "metrics"
+
+        metric_options = GOAL_SEEK_METRIC_OPTIONS.get(source, GOAL_SEEK_METRIC_OPTIONS["metrics"])
+        metric_key = str(row.get("metric", ""))
+        if metric_key not in metric_options:
+            continue
+
+        target_value = _coerce_optional_float(row.get("target"))
+        if target_value is None:
+            continue
+
+        year_value = _coerce_optional_int(row.get("year"))
+        apply_label, apply_fn = SENSITIVITY_OPTIONS[variable_key]
+
+        outputs_cache: Dict[float, ModelOutputs] = {1.0: base_outputs}
+        best_multiplier: float | None = None
+        best_value: float | None = None
+        best_diff = float("inf")
+
+        for multiplier in GOAL_SEEK_MULTIPLIERS:
+            if multiplier not in outputs_cache:
+                outputs_cache[multiplier] = _simulate_outputs(
+                    base_assumptions,
+                    lambda assumptions, fn=apply_fn, m=multiplier: fn(assumptions, m),
+                )
+
+            candidate_outputs = outputs_cache[multiplier]
+            value = _goal_seek_value(candidate_outputs, source, metric_key, year_value)
+            if pd.isna(value):
+                continue
+
+            diff = abs(value - target_value)
+            if diff < best_diff:
+                best_multiplier = multiplier
+                best_value = value
+                best_diff = diff
+
+        if best_multiplier is None or best_value is None:
+            continue
+
+        tolerance = max(1.0, abs(target_value) * 0.01)
+        status = "Within tolerance" if best_diff <= tolerance else "Closest found"
+        metric_label = metric_options.get(metric_key, metric_key.replace("_", " ").title())
+
         results.append(
             {
+                "Scenario Variable": apply_label,
+                "Metric": metric_label,
+                "Target": target_value,
+                "Year": year_value if year_value is not None else "N/A",
+                "Recommended Multiplier": best_multiplier,
+                "Projected Value": best_value,
+                "Difference": best_value - target_value,
+                "Status": status,
+            }
+        )
+
+    return results
+
+
+def _render_goal_seek_configuration(
+    base_assumptions: Assumptions,
+    base_outputs: ModelOutputs,
+) -> List[Dict[str, object]]:
+    """Render the goal seek configuration editor and resulting table."""
+
+    if GOAL_SEEK_STATE_KEY not in st.session_state:
+        st.session_state[GOAL_SEEK_STATE_KEY] = copy.deepcopy(GOAL_SEEK_DEFAULTS)
+
+    rows: List[Dict[str, object]] = st.session_state[GOAL_SEEK_STATE_KEY]
+    updated_rows: List[Dict[str, object]] = []
+    option_keys = list(SENSITIVITY_OPTIONS.keys())
+    default_variable = option_keys[0]
+    source_keys = list(GOAL_SEEK_SOURCE_LABELS.keys())
+
+    st.subheader("Goal Seek Configuration")
+    st.caption("Target key outcomes and the model will search for the multiplier that best meets the goal.")
+
+    for idx, row in enumerate(rows):
+        row_id = row.get("id") or uuid.uuid4().hex
+        current_source = row.get("source") if row.get("source") in source_keys else source_keys[0]
+        metric_options = GOAL_SEEK_METRIC_OPTIONS.get(current_source, GOAL_SEEK_METRIC_OPTIONS["metrics"])
+        metric_keys = list(metric_options.keys()) or list(MetricLabels.keys())
+        current_metric = row.get("metric") if row.get("metric") in metric_keys else metric_keys[0]
+        current_variable = row.get("variable") if row.get("variable") in option_keys else default_variable
+
+        with st.container(border=True):
+            col_source, col_metric = st.columns([2, 2])
+            source_value = col_source.selectbox(
+                "Metric Source",
+                options=source_keys,
+                index=source_keys.index(current_source),
+                key=f"{GOAL_SEEK_STATE_KEY}_source_{row_id}",
+                format_func=lambda opt: GOAL_SEEK_SOURCE_LABELS[opt],
+            )
+            metric_mapping = GOAL_SEEK_METRIC_OPTIONS.get(source_value, GOAL_SEEK_METRIC_OPTIONS["metrics"])
+            metric_keys = list(metric_mapping.keys()) or list(MetricLabels.keys())
+            if current_metric not in metric_keys:
+                current_metric = metric_keys[0]
+            metric_value = col_metric.selectbox(
+                "Metric",
+                options=metric_keys,
+                index=metric_keys.index(current_metric),
+                key=f"{GOAL_SEEK_STATE_KEY}_metric_{row_id}",
+                format_func=lambda opt, mapping=metric_mapping: mapping.get(opt, opt.replace("_", " ").title()),
+            )
+
+            col_variable, col_target, col_year, col_remove = st.columns([2.5, 2, 1.5, 1])
+            variable_value = col_variable.selectbox(
+                "Variable",
+                options=option_keys,
+                index=option_keys.index(current_variable),
+                key=f"{GOAL_SEEK_STATE_KEY}_variable_{row_id}",
+                format_func=lambda opt: SENSITIVITY_OPTIONS[opt][0],
+            )
+            target_value = col_target.text_input(
+                "Target Value",
+                value=str(row.get("target", "")),
+                key=f"{GOAL_SEEK_STATE_KEY}_target_{row_id}",
+            )
+            year_value = col_year.text_input(
+                "Year",
+                value=str(row.get("year", "")),
+                key=f"{GOAL_SEEK_STATE_KEY}_year_{row_id}",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{GOAL_SEEK_STATE_KEY}_remove_{row_id}")
+
+        if remove_clicked:
+            continue
+
+        updated_rows.append(
+            {
+                "id": row_id,
+                "source": source_value,
+                "metric": metric_value,
+                "variable": variable_value,
+                "target": target_value,
+                "year": year_value,
+            }
+        )
+
+    st.session_state[GOAL_SEEK_STATE_KEY] = updated_rows
+
+    if st.button("Add Goal Seek", key=f"{GOAL_SEEK_STATE_KEY}_add"):
+        metric_default_keys = list(GOAL_SEEK_METRIC_OPTIONS["metrics"].keys())
+        st.session_state[GOAL_SEEK_STATE_KEY].append(
+            {
+                "id": uuid.uuid4().hex,
+                "source": "metrics",
+                "metric": metric_default_keys[0] if metric_default_keys else "project_npv",
+                "variable": default_variable,
+                "target": "",
+                "year": "",
+            }
+        )
+
+    rows = st.session_state[GOAL_SEEK_STATE_KEY]
+    results = _evaluate_goal_seek_rows(base_assumptions, base_outputs, rows)
+
+    if results:
+        st.markdown("#### Goal Seek Results")
+        result_df = pd.DataFrame(results)
+        st.dataframe(result_df, use_container_width=True)
+    else:
+        st.info("Define at least one target with a variable to run goal seek simulations.")
+
+    return rows
+
+
+def _render_scenario_configuration() -> List[Dict[str, object]]:
+    """Render editable scenario rows for multi-factor analysis."""
+
+    if SCENARIO_STATE_KEY not in st.session_state:
+        st.session_state[SCENARIO_STATE_KEY] = copy.deepcopy(SCENARIO_DEFAULTS)
+
+    rows: List[Dict[str, object]] = st.session_state[SCENARIO_STATE_KEY]
+    updated_rows: List[Dict[str, object]] = []
+
+    st.subheader("Scenario / IFs Configuration")
+    st.caption("Adjust inflation, financing, and operating multipliers to build composite scenarios.")
+
+    for idx, row in enumerate(rows):
+        row_id = row.get("id") or uuid.uuid4().hex
+        with st.container(border=True):
+            col_name, col_infl, col_int, col_rev, col_opex, col_capex, col_cap, col_remove = st.columns([3, 2, 2, 2, 2, 2, 2, 1])
+
+            name_value = col_name.text_input(
+                "Scenario Name",
+                value=str(row.get("name", f"Scenario {idx + 1}")),
+                key=f"{SCENARIO_STATE_KEY}_name_{row_id}",
+            )
+            inflation_value = col_infl.number_input(
+                "Inflation Rate",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(row.get("inflation_rate", 0.02)),
+                step=0.001,
+                format="%.3f",
+                key=f"{SCENARIO_STATE_KEY}_inflation_{row_id}",
+            )
+            interest_value = col_int.number_input(
+                "Interest Rate",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(row.get("interest_rate", 0.05)),
+                step=0.001,
+                format="%.3f",
+                key=f"{SCENARIO_STATE_KEY}_interest_{row_id}",
+            )
+            revenue_multiplier = col_rev.number_input(
+                "Revenue Multiplier",
+                min_value=0.0,
+                value=float(row.get("revenue_multiplier", 1.0)),
+                step=0.01,
+                format="%.2f",
+                key=f"{SCENARIO_STATE_KEY}_revenue_{row_id}",
+            )
+            opex_multiplier = col_opex.number_input(
+                "Opex Multiplier",
+                min_value=0.0,
+                value=float(row.get("opex_multiplier", 1.0)),
+                step=0.01,
+                format="%.2f",
+                key=f"{SCENARIO_STATE_KEY}_opex_{row_id}",
+            )
+            capex_multiplier = col_capex.number_input(
+                "Capex Multiplier",
+                min_value=0.0,
+                value=float(row.get("capex_multiplier", 1.0)),
+                step=0.01,
+                format="%.2f",
+                key=f"{SCENARIO_STATE_KEY}_capex_{row_id}",
+            )
+            capacity_multiplier = col_cap.number_input(
+                "Capacity Multiplier",
+                min_value=0.0,
+                value=float(row.get("capacity_multiplier", 1.0)),
+                step=0.01,
+                format="%.2f",
+                key=f"{SCENARIO_STATE_KEY}_capacity_{row_id}",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{SCENARIO_STATE_KEY}_remove_{row_id}")
+
+        if remove_clicked:
+            continue
+
+        updated_rows.append(
+            {
+                "id": row_id,
+                "name": name_value,
+                "inflation_rate": inflation_value,
+                "interest_rate": interest_value,
+                "revenue_multiplier": revenue_multiplier,
+                "opex_multiplier": opex_multiplier,
+                "capex_multiplier": capex_multiplier,
+                "capacity_multiplier": capacity_multiplier,
+            }
+        )
+
+    st.session_state[SCENARIO_STATE_KEY] = updated_rows
+
+    if st.button("Add Scenario", key=f"{SCENARIO_STATE_KEY}_add"):
+        st.session_state[SCENARIO_STATE_KEY].append(
+            {
+                "id": uuid.uuid4().hex,
+                "name": "New Scenario",
+                "inflation_rate": 0.02,
+                "interest_rate": 0.05,
+                "revenue_multiplier": 1.0,
+                "opex_multiplier": 1.0,
+                "capex_multiplier": 1.0,
+                "capacity_multiplier": 1.0,
+            }
+        )
+
+    return st.session_state[SCENARIO_STATE_KEY]
+
+
+def _render_scenario_tool_configuration() -> Dict[str, Dict[str, object]]:
+    """Render configuration blocks for advanced scenario analysis tools."""
+
+    if SCENARIO_TOOL_STATE_KEY not in st.session_state:
+        st.session_state[SCENARIO_TOOL_STATE_KEY] = copy.deepcopy(SCENARIO_TOOL_DEFAULTS)
+
+    st.subheader("Scenario Tool Configuration")
+    st.caption("Document additional analytical approaches that accompany each scenario run.")
+
+    state: Dict[str, Dict[str, object]] = st.session_state[SCENARIO_TOOL_STATE_KEY]
+    updated_state: Dict[str, Dict[str, object]] = {}
+
+    for key, meta in SCENARIO_TOOL_SECTIONS:
+        section_state = state.get(key, {"variables": [], "iterate": ""})
+        section_variables = section_state.get("variables", [])
+        iterate_value = section_state.get("iterate", "")
+
+        with st.container(border=True):
+            st.markdown(f"**{meta['label']}**")
+            updated_variables: List[Dict[str, object]] = []
+
+            for var in section_variables:
+                row_id = var.get("id") or uuid.uuid4().hex
+                col_var, col_remove = st.columns([4, 1])
+                variable_value = col_var.text_input(
+                    "Variable",
+                    value=str(var.get("variable", "")),
+                    key=f"{SCENARIO_TOOL_STATE_KEY}_{key}_variable_{row_id}",
+                )
+                remove_clicked = col_remove.button(
+                    "Remove",
+                    key=f"{SCENARIO_TOOL_STATE_KEY}_{key}_remove_{row_id}",
+                )
+                if remove_clicked:
+                    continue
+                updated_variables.append({"id": row_id, "variable": variable_value})
+
+            if st.button("Add Variable", key=f"{SCENARIO_TOOL_STATE_KEY}_{key}_add"):
+                updated_variables.append({"id": uuid.uuid4().hex, "variable": ""})
+
+            if meta.get("show_iterate", False):
+                iterate_value = st.text_input(
+                    "Iterate",
+                    value=str(iterate_value),
+                    key=f"{SCENARIO_TOOL_STATE_KEY}_{key}_iterate",
+                )
+
+        updated_state[key] = {"variables": updated_variables, "iterate": iterate_value}
+
+    st.session_state[SCENARIO_TOOL_STATE_KEY] = updated_state
+    return updated_state
+
+
+def _build_scenario_dataframe(
+    base_assumptions: Assumptions,
+    base_outputs: ModelOutputs,
+    scenario_rows: List[Dict[str, object]],
+) -> pd.DataFrame:
+    """Construct a dataframe comparing configured scenarios."""
+
+    records: List[Dict[str, object]] = [
+        {
+            "Scenario": "Base Case",
+            "Inflation Rate": float("nan"),
+            "Interest Rate": float("nan"),
+            "Revenue Multiplier": 1.0,
+            "Opex Multiplier": 1.0,
+            "Capex Multiplier": 1.0,
+            "Capacity Multiplier": 1.0,
+            "Project NPV": base_outputs.metrics.get("project_npv", float("nan")),
+            "Project IRR": base_outputs.metrics.get("project_irr", float("nan")),
+            "Equity IRR": base_outputs.metrics.get("equity_irr", float("nan")),
+            "Investor IRR": base_outputs.metrics.get("investor_irr", float("nan")),
+            "Owner IRR": base_outputs.metrics.get("owner_irr", float("nan")),
+            "Payback (months)": base_outputs.metrics.get("project_payback_months", float("nan")),
+        }
+    ]
+
+    for idx, row in enumerate(scenario_rows):
+        name = str(row.get("name", f"Scenario {idx + 1}")).strip() or f"Scenario {idx + 1}"
+        inflation_rate = _coerce_optional_float(row.get("inflation_rate"))
+        interest_rate = _coerce_optional_float(row.get("interest_rate"))
+        revenue_multiplier = _coerce_float(row.get("revenue_multiplier"), 1.0)
+        opex_multiplier = _coerce_float(row.get("opex_multiplier"), 1.0)
+        capex_multiplier = _coerce_float(row.get("capex_multiplier"), 1.0)
+        capacity_multiplier = _coerce_float(row.get("capacity_multiplier"), 1.0)
+
+        requires_simulation = not (
+            math.isclose(revenue_multiplier, 1.0, rel_tol=1e-9)
+            and math.isclose(opex_multiplier, 1.0, rel_tol=1e-9)
+            and math.isclose(capex_multiplier, 1.0, rel_tol=1e-9)
+            and math.isclose(capacity_multiplier, 1.0, rel_tol=1e-9)
+            and inflation_rate is None
+            and interest_rate is None
+        )
+
+        if requires_simulation:
+
+            def modifier(assumptions: Assumptions) -> None:
+                if not math.isclose(revenue_multiplier, 1.0, rel_tol=1e-9):
+                    assumptions.revenue.ppa.rate_curve.initial *= revenue_multiplier
+                    assumptions.revenue.merchant.rate_curve.initial *= revenue_multiplier
+                    assumptions.revenue.rec.initial *= revenue_multiplier
+
+                if not math.isclose(opex_multiplier, 1.0, rel_tol=1e-9):
+                    for item in assumptions.fixed_opex:
+                        item.annual_cost = max(0.0, item.annual_cost * opex_multiplier)
+                    for item in assumptions.variable_opex:
+                        item.cost_per_mwh = max(0.0, item.cost_per_mwh * opex_multiplier)
+
+                if not math.isclose(capex_multiplier, 1.0, rel_tol=1e-9):
+                    for item in assumptions.capex_items:
+                        item.amount = max(0.0, item.amount * capex_multiplier)
+
+                if not math.isclose(capacity_multiplier, 1.0, rel_tol=1e-9):
+                    assumptions.energy.capacity_factor = max(
+                        0.01,
+                        min(1.0, assumptions.energy.capacity_factor * capacity_multiplier),
+                    )
+
+                if inflation_rate is not None:
+                    for item in assumptions.fixed_opex:
+                        item.inflation_rate = inflation_rate
+                    for item in assumptions.variable_opex:
+                        item.escalation_rate = inflation_rate
+
+                if interest_rate is not None:
+                    for facility in assumptions.debt_facilities:
+                        facility.interest_rate = interest_rate
+
+            scenario_outputs = _simulate_outputs(base_assumptions, modifier)
+        else:
+            scenario_outputs = base_outputs
+
+        metrics = scenario_outputs.metrics
+        records.append(
+            {
                 "Scenario": name,
+                "Inflation Rate": inflation_rate if inflation_rate is not None else float("nan"),
+                "Interest Rate": interest_rate if interest_rate is not None else float("nan"),
+                "Revenue Multiplier": revenue_multiplier,
+                "Opex Multiplier": opex_multiplier,
+                "Capex Multiplier": capex_multiplier,
+                "Capacity Multiplier": capacity_multiplier,
                 "Project NPV": metrics.get("project_npv", float("nan")),
                 "Project IRR": metrics.get("project_irr", float("nan")),
                 "Equity IRR": metrics.get("equity_irr", float("nan")),
@@ -2254,16 +2863,48 @@ def _render_scenario_analysis(base_assumptions: Assumptions, outputs: ModelOutpu
             }
         )
 
-    scenario_df = pd.DataFrame(results)
+    return pd.DataFrame(records)
+
+
+def _render_scenario_analysis(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
+    """Display configurable goal seek, scenario, and analysis tool controls."""
+
     st.header("Scenario / IFs Analysis")
+    _render_goal_seek_configuration(base_assumptions, outputs)
+    scenario_rows = _render_scenario_configuration()
+    _render_scenario_tool_configuration()
+
+    scenario_df = _build_scenario_dataframe(base_assumptions, outputs, scenario_rows)
+
+    if scenario_df.empty:
+        st.info("Add scenarios to generate comparison results.")
+        return
+
+    st.markdown("#### Scenario Comparison")
     st.dataframe(scenario_df, use_container_width=True)
 
-    selected = st.selectbox("Select scenario for highlight", scenario_df["Scenario"].tolist())
+    selected = st.selectbox(
+        "Select scenario for highlight",
+        scenario_df["Scenario"].tolist(),
+        key="scenario_highlight",
+    )
     selected_row = scenario_df[scenario_df["Scenario"] == selected].iloc[0]
     highlight_cols = st.columns(3)
-    highlight_cols[0].metric("Project NPV", _format_currency(selected_row["Project NPV"]))
-    highlight_cols[1].metric("Project IRR", _format_percentage(selected_row["Project IRR"]))
-    highlight_cols[2].metric("Payback", f"{selected_row['Payback (months)']:.0f} months")
+    highlight_cols[0].metric(
+        "Project NPV",
+        _format_currency(selected_row.get("Project NPV", float("nan"))),
+    )
+    highlight_cols[1].metric(
+        "Project IRR",
+        _format_percentage(selected_row.get("Project IRR", float("nan"))),
+    )
+    highlight_cols[2].metric(
+        "Payback",
+        _format_metric(
+            "project_payback_months",
+            selected_row.get("Payback (months)", float("nan")),
+        ),
+    )
 
 
 def _render_monte_carlo(base_assumptions: Assumptions) -> None:
