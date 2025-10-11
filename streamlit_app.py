@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import tempfile
 import uuid
 from datetime import date
@@ -485,6 +486,81 @@ REVENUE_DEFAULTS: List[GenericTableRow] = [
         "format": "%.3f",
     },
 ]
+
+
+def _apply_sensitivity_ppa_rate(assumptions: Assumptions, multiplier: float) -> None:
+    assumptions.revenue.ppa.rate_curve.initial = max(
+        0.0, assumptions.revenue.ppa.rate_curve.initial * multiplier
+    )
+
+
+def _apply_sensitivity_merchant_rate(assumptions: Assumptions, multiplier: float) -> None:
+    assumptions.revenue.merchant.rate_curve.initial = max(
+        0.0, assumptions.revenue.merchant.rate_curve.initial * multiplier
+    )
+
+
+def _apply_sensitivity_rec_rate(assumptions: Assumptions, multiplier: float) -> None:
+    assumptions.revenue.rec.initial = max(0.0, assumptions.revenue.rec.initial * multiplier)
+
+
+def _apply_sensitivity_capacity_factor(assumptions: Assumptions, multiplier: float) -> None:
+    new_factor = assumptions.energy.capacity_factor * multiplier
+    assumptions.energy.capacity_factor = max(0.01, min(1.0, new_factor))
+
+
+def _apply_sensitivity_capex(assumptions: Assumptions, multiplier: float) -> None:
+    for item in assumptions.capex_items:
+        item.amount = max(0.0, item.amount * multiplier)
+
+
+def _apply_sensitivity_fixed_opex(assumptions: Assumptions, multiplier: float) -> None:
+    for item in assumptions.fixed_opex:
+        item.annual_cost = max(0.0, item.annual_cost * multiplier)
+
+
+def _apply_sensitivity_variable_opex(assumptions: Assumptions, multiplier: float) -> None:
+    for item in assumptions.variable_opex:
+        item.cost_per_mwh = max(0.0, item.cost_per_mwh * multiplier)
+
+
+def _apply_sensitivity_discount_rate(assumptions: Assumptions, multiplier: float) -> None:
+    updated = assumptions.global_assumptions.discount_rate * multiplier
+    assumptions.global_assumptions.discount_rate = max(0.0, min(0.99, updated))
+
+
+SENSITIVITY_OPTIONS: Dict[str, Tuple[str, Callable[[Assumptions, float], None]]] = {
+    "ppa_rate": ("PPA Rate", _apply_sensitivity_ppa_rate),
+    "merchant_rate": ("Merchant Rate", _apply_sensitivity_merchant_rate),
+    "rec_rate": ("REC Price", _apply_sensitivity_rec_rate),
+    "capacity_factor": ("Capacity Factor", _apply_sensitivity_capacity_factor),
+    "capex_total": ("Total Capex", _apply_sensitivity_capex),
+    "fixed_opex": ("Fixed Opex", _apply_sensitivity_fixed_opex),
+    "variable_opex": ("Variable Opex", _apply_sensitivity_variable_opex),
+    "discount_rate": ("Discount Rate", _apply_sensitivity_discount_rate),
+}
+
+
+SENSITIVITY_DEFAULTS: List[Dict[str, object]] = [
+    {
+        "id": "sensitivity_ppa",
+        "variable": "ppa_rate",
+        "multipliers": "0.90, 1.00, 1.10",
+    },
+    {
+        "id": "sensitivity_capacity",
+        "variable": "capacity_factor",
+        "multipliers": "0.95, 1.00, 1.05",
+    },
+    {
+        "id": "sensitivity_capex",
+        "variable": "capex_total",
+        "multipliers": "0.90, 1.00, 1.10",
+    },
+]
+
+
+SENSITIVITY_STATE_KEY = "sensitivity_config"
 
 
 SEASONALITY_DEFAULTS = [
@@ -1980,6 +2056,86 @@ def _render_cash_flow_statement(outputs: ModelOutputs) -> None:
     st.dataframe(cash_flow, use_container_width=True)
 
 
+def _parse_multiplier_string(value: str) -> Tuple[List[float], List[str]]:
+    """Split a comma-separated multiplier string into floats and invalid tokens."""
+
+    if not value:
+        return [], []
+
+    values: List[float] = []
+    invalid: List[str] = []
+    for raw in value.replace(";", ",").split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            values.append(float(token))
+        except ValueError:
+            invalid.append(token)
+    return values, invalid
+
+
+def _render_sensitivity_configuration() -> List[Dict[str, object]]:
+    """Render editable sensitivity configuration rows and return the stored state."""
+
+    if SENSITIVITY_STATE_KEY not in st.session_state:
+        st.session_state[SENSITIVITY_STATE_KEY] = copy.deepcopy(SENSITIVITY_DEFAULTS)
+
+    rows: List[Dict[str, object]] = st.session_state[SENSITIVITY_STATE_KEY]
+    updated_rows: List[Dict[str, object]] = []
+    option_keys = list(SENSITIVITY_OPTIONS.keys())
+    default_key = option_keys[0]
+
+    st.subheader("Sensitivity Analysis Configuration")
+    st.caption("Configure the variables and multiplier ranges used for the one-way analysis.")
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_variable, col_multipliers, col_remove = st.columns([2, 3, 1])
+            current_key = str(row.get("variable", default_key))
+            if current_key not in option_keys:
+                current_key = default_key
+            variable_key = col_variable.selectbox(
+                "Variable",
+                options=option_keys,
+                index=option_keys.index(current_key),
+                key=f"{SENSITIVITY_STATE_KEY}_variable_{idx}",
+                format_func=lambda opt: SENSITIVITY_OPTIONS[opt][0],
+            )
+            multipliers_value = col_multipliers.text_input(
+                "Multipliers",
+                value=str(row.get("multipliers", "0.90, 1.00, 1.10")),
+                key=f"{SENSITIVITY_STATE_KEY}_multipliers_{idx}",
+                placeholder="0.90, 1.00, 1.10",
+            )
+            remove_clicked = col_remove.button(
+                "Remove",
+                key=f"{SENSITIVITY_STATE_KEY}_remove_{idx}",
+            )
+        if remove_clicked:
+            continue
+        updated_rows.append(
+            {
+                "id": row.get("id") or uuid.uuid4().hex,
+                "variable": variable_key,
+                "multipliers": multipliers_value,
+            }
+        )
+
+    st.session_state[SENSITIVITY_STATE_KEY] = updated_rows
+
+    if st.button("Add Variable", key=f"{SENSITIVITY_STATE_KEY}_add"):
+        st.session_state[SENSITIVITY_STATE_KEY].append(
+            {
+                "id": uuid.uuid4().hex,
+                "variable": default_key,
+                "multipliers": "0.90, 1.00, 1.10",
+            }
+        )
+
+    return st.session_state[SENSITIVITY_STATE_KEY]
+
+
 def _simulate_metrics(base: Assumptions, modifier: Callable[[Assumptions], None]) -> Dict[str, float]:
     """Clone assumptions, apply a modifier, and return the resulting metrics."""
 
@@ -1991,57 +2147,73 @@ def _simulate_metrics(base: Assumptions, modifier: Callable[[Assumptions], None]
 
 
 def _render_sensitivity_analysis(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
-    """Present one-way sensitivity tables for key drivers."""
+    """Present configurable one-way sensitivity tables for key drivers."""
 
-    variations: Dict[str, Callable[[Assumptions], None]] = {
-        "PPA Rate -10%": lambda a: setattr(a.revenue.ppa.rate_curve, "initial", a.revenue.ppa.rate_curve.initial * 0.90),
-        "PPA Rate +10%": lambda a: setattr(a.revenue.ppa.rate_curve, "initial", a.revenue.ppa.rate_curve.initial * 1.10),
-        "Capacity Factor -10%": lambda a: setattr(
-            a.energy,
-            "capacity_factor",
-            max(0.01, min(1.0, a.energy.capacity_factor * 0.90)),
-        ),
-        "Capacity Factor +10%": lambda a: setattr(
-            a.energy,
-            "capacity_factor",
-            max(0.01, min(1.0, a.energy.capacity_factor * 1.10)),
-        ),
-        "Capex +10%": lambda a: [setattr(item, "amount", item.amount * 1.10) for item in a.capex_items],
-        "Capex -10%": lambda a: [setattr(item, "amount", item.amount * 0.90) for item in a.capex_items],
-        "Opex +10%": lambda a: (
-            [setattr(item, "annual_cost", item.annual_cost * 1.10) for item in a.fixed_opex],
-            [setattr(item, "cost_per_mwh", item.cost_per_mwh * 1.10) for item in a.variable_opex],
-        ),
-        "Opex -10%": lambda a: (
-            [setattr(item, "annual_cost", item.annual_cost * 0.90) for item in a.fixed_opex],
-            [setattr(item, "cost_per_mwh", item.cost_per_mwh * 0.90) for item in a.variable_opex],
-        ),
-    }
+    st.header("Sensitivity Analyses")
+    config_rows = _render_sensitivity_configuration()
 
     records = [
         {
+            "Variable": "Base Case",
+            "Multiplier": 1.0,
             "Scenario": "Base Case",
             "Project NPV": outputs.metrics.get("project_npv", float("nan")),
             "Project IRR": outputs.metrics.get("project_irr", float("nan")),
             "Equity IRR": outputs.metrics.get("equity_irr", float("nan")),
+            "Investor IRR": outputs.metrics.get("investor_irr", float("nan")),
+            "Owner IRR": outputs.metrics.get("owner_irr", float("nan")),
             "Payback (months)": outputs.metrics.get("project_payback_months", float("nan")),
         }
     ]
 
-    for name, modifier in variations.items():
-        metrics = _simulate_metrics(base_assumptions, modifier)
-        records.append(
-            {
-                "Scenario": name,
-                "Project NPV": metrics.get("project_npv", float("nan")),
-                "Project IRR": metrics.get("project_irr", float("nan")),
-                "Equity IRR": metrics.get("equity_irr", float("nan")),
-                "Payback (months)": metrics.get("project_payback_months", float("nan")),
-            }
-        )
+    produced_results = False
 
+    for row in config_rows:
+        key = str(row.get("variable", ""))
+        if key not in SENSITIVITY_OPTIONS:
+            continue
+
+        label, apply_fn = SENSITIVITY_OPTIONS[key]
+        multipliers_text = str(row.get("multipliers", "")).strip()
+        multipliers, invalid_tokens = _parse_multiplier_string(multipliers_text)
+
+        if invalid_tokens:
+            st.warning(f"Ignoring invalid multipliers for {label}: {', '.join(invalid_tokens)}")
+
+        if not multipliers:
+            continue
+
+        for multiplier in multipliers:
+            if math.isclose(multiplier, 1.0, rel_tol=1e-9):
+                metrics = outputs.metrics
+            else:
+                metrics = _simulate_metrics(
+                    base_assumptions,
+                    lambda assumptions, fn=apply_fn, m=multiplier: fn(assumptions, m),
+                )
+
+            records.append(
+                {
+                    "Variable": label,
+                    "Multiplier": multiplier,
+                    "Scenario": f"{label} x{multiplier:.2f}",
+                    "Project NPV": metrics.get("project_npv", float("nan")),
+                    "Project IRR": metrics.get("project_irr", float("nan")),
+                    "Equity IRR": metrics.get("equity_irr", float("nan")),
+                    "Investor IRR": metrics.get("investor_irr", float("nan")),
+                    "Owner IRR": metrics.get("owner_irr", float("nan")),
+                    "Payback (months)": metrics.get("project_payback_months", float("nan")),
+                }
+            )
+            produced_results = True
+
+    if not produced_results:
+        st.info("Add sensitivity variables and multipliers to generate simulation results.")
+        return
+
+    st.markdown("#### Simulation Results")
     sensitivity_df = pd.DataFrame(records)
-    st.header("Sensitivity Analyses")
+    sensitivity_df = sensitivity_df.sort_values(["Variable", "Multiplier"])
     st.dataframe(sensitivity_df, use_container_width=True)
 
 
