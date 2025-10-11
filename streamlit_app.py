@@ -29,7 +29,9 @@ MetricLabels = {
 
 @st.cache_data(show_spinner=False)
 def _run_model(
-    excel_bytes: bytes | None, override_items: Tuple[Tuple[str, float | bool], ...]
+    excel_bytes: bytes | None,
+    override_items: Tuple[Tuple[str, float | bool], ...],
+    seasonality_rows: Tuple[Tuple[str, float], ...],
 ) -> Tuple[ModelOutputs, Dict[str, pd.DataFrame], Assumptions]:
     """Execute the financial model with optional overrides and return outputs."""
 
@@ -57,6 +59,12 @@ def _run_model(
     energy.capacity_mw = float(overrides["capacity_mw"])
     energy.capacity_factor = float(overrides["capacity_factor"])
     energy.degradation_rate = float(overrides["degradation_rate"])
+
+    if seasonality_rows:
+        raw_shares: List[float] = [max(0.0, _coerce_float(share_value)) for _, share_value in seasonality_rows]
+        total = sum(raw_shares)
+        if total > 0 and len(raw_shares) == 12:
+            energy.seasonality = [value / total for value in raw_shares]
 
     revenue = assumptions.revenue
     ppa_share = float(overrides["ppa_share"])
@@ -101,6 +109,13 @@ def _downloadable_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=True).encode("utf-8")
 
 
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
 
 
@@ -141,6 +156,22 @@ REVENUE_DEFAULTS: List[GenericTableRow] = [
     {"label": "Merchant Annual Escalation", "value": 0.015, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
     {"label": "Year 1 REC Price ($/MWh)", "value": 40.0, "input_type": "number", "min": 0.0, "step": 1.0},
     {"label": "REC Annual Escalation", "value": 0.02, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
+]
+
+
+SEASONALITY_DEFAULTS = [
+    {"month": "January", "share": 0.05},
+    {"month": "February", "share": 0.05},
+    {"month": "March", "share": 0.05},
+    {"month": "April", "share": 0.10},
+    {"month": "May", "share": 0.12},
+    {"month": "June", "share": 0.17},
+    {"month": "July", "share": 0.17},
+    {"month": "August", "share": 0.10},
+    {"month": "September", "share": 0.05},
+    {"month": "October", "share": 0.04},
+    {"month": "November", "share": 0.05},
+    {"month": "December", "share": 0.05},
 ]
 
 
@@ -279,6 +310,56 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
 
     if st.button(f"Add {title} Row", key=f"{state_key}_add"):
         st.session_state[state_key].append({"label": "New Item", "input_type": "number", "value": 0.0, "step": 0.1})
+
+
+def _render_seasonality_table() -> List[Dict[str, object]]:
+    state_key = "seasonality_table"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(SEASONALITY_DEFAULTS)
+
+    st.markdown("### Seasonal Production Profile")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    total_share = 0.0
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_month, col_share, col_remove = st.columns([3, 2, 1])
+            month = col_month.text_input(
+                "Month",
+                value=str(row.get("month", "")),
+                key=f"{state_key}_month_{idx}",
+                label_visibility="collapsed",
+            )
+            share = col_share.number_input(
+                "Share",
+                value=float(row.get("share", 0.0)),
+                key=f"{state_key}_share_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.001,
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        total_share += share
+        updated_rows.append({"month": month, "share": share})
+
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Seasonality Row", key=f"{state_key}_add"):
+        st.session_state[state_key].append({"month": "New Period", "share": 0.0})
+
+    if updated_rows:
+        if len(updated_rows) != 12:
+            st.warning("Seasonality should include 12 months to align with the model timeline.")
+        if not np.isclose(total_share, 1.0, atol=0.05):
+            st.info(
+                f"Current seasonality shares sum to {total_share:.2f}. The model will normalise values when running."
+            )
+
+    return updated_rows
 
 
 def _render_projection_horizon_section() -> None:
@@ -716,7 +797,7 @@ def _get_row_value(state_key: str, label: str, default: float | bool, expected_t
         return default
 
 
-def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]]:
+def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool], List[Dict[str, object]]]:
     """Render the primary assumption inputs and return override values."""
 
     st.subheader("Assumptions")
@@ -736,6 +817,7 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
     _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
     _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
+    seasonality_rows = _render_seasonality_table()
     _render_labour_structure_section()
     _render_fixed_variable_costs_section()
     _render_accounts_receivable_section()
@@ -771,7 +853,7 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
         "rec_escalation": float(_get_row_value("revenue_table", "REC Annual Escalation", 0.02, float)),
     }
 
-    return excel_bytes, overrides
+    return excel_bytes, overrides, seasonality_rows
 
 
 def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> None:
@@ -1295,11 +1377,14 @@ PAGE_OPTIONS = [
 tabs = st.tabs(PAGE_OPTIONS)
 
 with tabs[0]:
-    excel_bytes, override_dict = _render_assumption_controls()
+    excel_bytes, override_dict, seasonality_rows = _render_assumption_controls()
 
 override_tuple = tuple(sorted(override_dict.items()))
+seasonality_tuple = tuple(
+    (str(row.get("month", "")), _coerce_float(row.get("share", 0.0))) for row in seasonality_rows
+)
 
-outputs, summary_tables, assumptions = _run_model(excel_bytes, override_tuple)
+outputs, summary_tables, assumptions = _run_model(excel_bytes, override_tuple, seasonality_tuple)
 
 with tabs[0]:
     st.divider()
