@@ -328,6 +328,33 @@ def _tupleize(rows: List[Dict[str, object]], fields: Tuple[str, ...]) -> Tuple[T
     return tuple(tuple(row.get(field) for field in fields) for row in rows)
 
 
+def _projection_year_bounds() -> Tuple[int, int]:
+    """Return the inclusive start/end years configured for the projection horizon."""
+
+    start_year = int(st.session_state.get("projection_start_year", 2025))
+    end_year = int(st.session_state.get("projection_end_year", start_year))
+    if end_year < start_year:
+        end_year = start_year
+    return start_year, end_year
+
+
+def _projection_year_options() -> List[int]:
+    """Return the selectable year options constrained to the projection horizon."""
+
+    start_year, end_year = _projection_year_bounds()
+    return list(range(start_year, end_year + 1)) or [start_year]
+
+
+def _format_projection_caption(assumptions: Assumptions) -> str:
+    """Return a human-readable summary of the configured projection horizon."""
+
+    start = pd.Timestamp(assumptions.global_assumptions.start_date)
+    months = max(1, int(assumptions.global_assumptions.forecast_months))
+    end = (start + pd.DateOffset(months=months - 1)).date()
+    years = months / 12.0
+    return f"Projection horizon: {start.strftime('%Y-%m')} – {end.strftime('%Y-%m')} ({years:.1f} years)"
+
+
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
 
 
@@ -673,14 +700,14 @@ FIXED_VARIABLE_DEFAULTS = [
 
 
 ACCOUNTS_RECEIVABLE_DEFAULTS = [
-    {"year": 2024, "days_in_year": 366, "receivable_days": 45, "prepaid_expense_days": 30, "other_asset_days": 5},
     {"year": 2025, "days_in_year": 365, "receivable_days": 45, "prepaid_expense_days": 30, "other_asset_days": 5},
+    {"year": 2026, "days_in_year": 365, "receivable_days": 45, "prepaid_expense_days": 30, "other_asset_days": 5},
 ]
 
 
 INVENTORY_PAYABLE_DEFAULTS = [
-    {"year": 2024, "days_in_year": 366, "inventory_days": 50, "accounts_payable_days": 45},
     {"year": 2025, "days_in_year": 365, "inventory_days": 50, "accounts_payable_days": 45},
+    {"year": 2026, "days_in_year": 365, "inventory_days": 50, "accounts_payable_days": 45},
 ]
 
 
@@ -688,7 +715,7 @@ FIXED_ASSET_DEFAULTS = [
     {
         "asset_type": "Land",
         "method": "Straight-Line",
-        "year": 2024,
+        "year": 2025,
         "acquisition": 1_000_000.0,
         "asset_life": 20.0,
         "net_book_value": 1_000_000.0,
@@ -701,7 +728,7 @@ FIXED_ASSET_DEFAULTS = [
     {
         "asset_type": "GMP Facility",
         "method": "Straight-Line",
-        "year": 2024,
+        "year": 2025,
         "acquisition": 2_500_000.0,
         "asset_life": 15.0,
         "net_book_value": 2_500_000.0,
@@ -810,7 +837,7 @@ SCENARIO_TOOL_STATE_KEY = "scenario_tool_config"
 LOAN_SCHEDULE_DEFAULTS = [
     {
         "name": "Construction Loan",
-        "year": 2024,
+        "year": 2025,
         "duration_years": 5,
         "amount": 2_000_000.0,
         "interest_rate": 0.06,
@@ -819,28 +846,28 @@ LOAN_SCHEDULE_DEFAULTS = [
 
 
 TAX_SCHEDULE_DEFAULTS = [
-    {"name": "Federal Tax", "year": 2024, "tax_rate": 0.25},
     {"name": "Federal Tax", "year": 2025, "tax_rate": 0.25},
+    {"name": "Federal Tax", "year": 2026, "tax_rate": 0.25},
 ]
 
 
 INFLATION_SCHEDULE_DEFAULTS = [
-    {"name": "Base Inflation", "year": 2024, "rate": 0.025},
     {"name": "Base Inflation", "year": 2025, "rate": 0.025},
+    {"name": "Base Inflation", "year": 2026, "rate": 0.025},
 ]
 
 
 RISK_SCHEDULE_DEFAULTS = [
     {
         "name": "Baseline",
-        "year": 2024,
+        "year": 2025,
         "inherent_risk": 0.05,
         "climate_risk": 0.02,
         "political_risk": 0.03,
     },
     {
         "name": "Baseline",
-        "year": 2025,
+        "year": 2026,
         "inherent_risk": 0.05,
         "climate_risk": 0.02,
         "political_risk": 0.03,
@@ -1068,9 +1095,9 @@ def _render_seasonality_table() -> List[Dict[str, object]]:
 def _render_projection_horizon_section() -> Tuple[int, int]:
     st.markdown("### Projection Horizon")
     if "projection_start_year" not in st.session_state:
-        st.session_state["projection_start_year"] = 2024
+        st.session_state["projection_start_year"] = 2025
     if "projection_end_year" not in st.session_state:
-        st.session_state["projection_end_year"] = 2033
+        st.session_state["projection_end_year"] = 2044
 
     start_year_options = list(range(2020, 2051))
     start_year = st.selectbox(
@@ -1174,7 +1201,10 @@ def _render_accounts_receivable_section() -> None:
     st.markdown("### Accounts Receivable Input Table")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
     for idx, row in enumerate(rows):
         with st.container(border=True):
             col_year, col_days, col_ar_days, col_prepaid, col_other, col_remove = st.columns([1.2, 1, 1, 1, 1, 0.8])
@@ -1231,7 +1261,13 @@ def _render_accounts_receivable_section() -> None:
     st.session_state[state_key] = updated_rows
 
     if st.button("Add Receivable Year", key=f"{state_key}_add"):
-        next_year = max(row["year"] for row in st.session_state[state_key]) + 1 if st.session_state[state_key] else 2024
+        next_year = (
+            max(row["year"] for row in st.session_state[state_key]) + 1
+            if st.session_state[state_key]
+            else start_year
+        )
+        if next_year > year_options[-1]:
+            next_year = year_options[-1]
         st.session_state[state_key].append(
             {
                 "year": next_year,
@@ -1251,7 +1287,10 @@ def _render_inventory_payables_section() -> None:
     st.markdown("### Inventory & Accounts Payable Input Table")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
     for idx, row in enumerate(rows):
         with st.container(border=True):
             col_year, col_days, col_inventory, col_payable, col_remove = st.columns([1.2, 1, 1, 1, 0.8])
@@ -1300,7 +1339,13 @@ def _render_inventory_payables_section() -> None:
     st.session_state[state_key] = updated_rows
 
     if st.button("Add Inventory Year", key=f"{state_key}_add"):
-        next_year = max(row["year"] for row in st.session_state[state_key]) + 1 if st.session_state[state_key] else 2024
+        next_year = (
+            max(row["year"] for row in st.session_state[state_key]) + 1
+            if st.session_state[state_key]
+            else start_year
+        )
+        if next_year > year_options[-1]:
+            next_year = year_options[-1]
         st.session_state[state_key].append(
             {
                 "year": next_year,
@@ -1320,7 +1365,10 @@ def _render_fixed_assets_section() -> None:
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
     method_options = ["Straight-Line", "Declining Balance"]
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
     for idx, row in enumerate(rows):
         with st.container(border=True):
             (
@@ -1479,7 +1527,10 @@ def _render_loan_schedule_section() -> None:
 
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
@@ -1548,8 +1599,10 @@ def _render_loan_schedule_section() -> None:
         next_year = (
             max(row["year"] for row in st.session_state[state_key]) + 1
             if st.session_state[state_key]
-            else 2024
+            else start_year
         )
+        if next_year > year_options[-1]:
+            next_year = year_options[-1]
         st.session_state[state_key].append(
             {
                 "name": f"Facility {len(st.session_state[state_key]) + 1}",
@@ -1624,7 +1677,10 @@ def _render_tax_schedule_section() -> None:
 
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
@@ -1663,8 +1719,10 @@ def _render_tax_schedule_section() -> None:
         next_year = (
             max(row["year"] for row in st.session_state[state_key]) + 1
             if st.session_state[state_key]
-            else 2024
+            else start_year
         )
+        if next_year > year_options[-1]:
+            next_year = year_options[-1]
         st.session_state[state_key].append(
             {
                 "name": f"Tax {len(st.session_state[state_key]) + 1}",
@@ -1686,7 +1744,10 @@ def _render_inflation_schedule_section() -> None:
     st.markdown("### Inflation Schedule")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
@@ -1725,8 +1786,10 @@ def _render_inflation_schedule_section() -> None:
         next_year = (
             max(row["year"] for row in st.session_state[state_key]) + 1
             if st.session_state[state_key]
-            else 2024
+            else start_year
         )
+        if next_year > year_options[-1]:
+            next_year = year_options[-1]
         st.session_state[state_key].append(
             {
                 "name": f"Inflation {len(st.session_state[state_key]) + 1}",
@@ -1748,7 +1811,10 @@ def _render_risk_schedule_section() -> None:
     st.markdown("### Risk Schedule")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    year_options = list(range(2024, 2051))
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
@@ -1821,8 +1887,10 @@ def _render_risk_schedule_section() -> None:
         next_year = (
             max(row["year"] for row in st.session_state[state_key]) + 1
             if st.session_state[state_key]
-            else 2024
+            else start_year
         )
+        if next_year > year_options[-1]:
+            next_year = year_options[-1]
         st.session_state[state_key].append(
             {
                 "name": f"Risk {len(st.session_state[state_key]) + 1}",
@@ -1857,7 +1925,7 @@ def _get_row_value(state_key: str, field_id: str, default: float | bool, expecte
 
 def _render_assumption_controls() -> tuple[
     bytes | None,
-    Dict[str, float | bool],
+    Dict[str, float | bool | int],
     List[Dict[str, object]],
     List[Dict[str, object]],
     List[Dict[str, object]],
@@ -1931,8 +1999,8 @@ def _render_assumption_controls() -> tuple[
         "merchant_escalation": float(_get_row_value("revenue_table", "merchant_escalation", 0.015, float)),
         "rec_rate": float(_get_row_value("revenue_table", "rec_rate", 40.0, float)),
         "rec_escalation": float(_get_row_value("revenue_table", "rec_escalation", 0.02, float)),
-        "start_year": float(start_year),
-        "end_year": float(end_year),
+        "start_year": int(start_year),
+        "end_year": int(end_year),
     }
 
     labour_rows = [
@@ -1986,12 +2054,18 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
     metrics = outputs.metrics
 
     st.header("Core Assumptions")
+    start_timestamp = pd.Timestamp(global_cfg.start_date)
+    horizon_months = max(1, int(global_cfg.forecast_months))
+    horizon_end = (start_timestamp + pd.DateOffset(months=horizon_months - 1)).date()
+    horizon_years = horizon_months / 12.0
     core_df = pd.DataFrame(
         {
             "Metric": [
                 "Project Name",
                 "Forecast Months",
+                "Forecast Years",
                 "Start Date",
+                "End Date",
                 "Include Terminal Value",
                 "Exit EBITDA Multiple",
                 "Discount Rate",
@@ -2000,8 +2074,10 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
             ],
             "Value": [
                 global_cfg.project_name,
-                global_cfg.forecast_months,
+                horizon_months,
+                f"{horizon_years:.1f}",
                 global_cfg.start_date.strftime("%Y-%m-%d"),
+                horizon_end.strftime("%Y-%m-%d"),
                 "Yes" if global_cfg.include_terminal_value else "No",
                 f"{global_cfg.exit_multiple:.2f}x",
                 _format_percentage(global_cfg.discount_rate),
@@ -3604,12 +3680,16 @@ outputs, summary_tables, assumptions = _run_model(
     risk_tuple,
 )
 
+projection_caption = _format_projection_caption(assumptions)
+
 with tabs[0]:
     st.divider()
+    st.caption(projection_caption)
     _render_input_landing(assumptions, outputs)
 
 for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
     with tab:
+        st.caption(projection_caption)
         if page_name == "Key Metrics Dashboard":
             st.header("Overview")
             _render_overview(outputs, summary_tables)
