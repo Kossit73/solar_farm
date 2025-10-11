@@ -622,16 +622,7 @@ PAGE_OPTIONS = [
     "Break-Even & Payback",
 ]
 
-selected_page = st.radio(
-    "Navigation",
-    options=PAGE_OPTIONS,
-    index=0,
-    horizontal=True,
-    label_visibility="collapsed",
-    key="top_navigation",
-)
-
-st.divider()
+tabs = st.tabs(PAGE_OPTIONS)
 
 with st.sidebar:
     st.header("Assumptions")
@@ -700,34 +691,36 @@ excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
 
 outputs, summary_tables, assumptions = _run_model(excel_bytes, override_tuple)
 
-if selected_page == "Input Landing Page":
-    _render_input_landing(assumptions, outputs)
-elif selected_page == "Key Metrics Dashboard":
-    st.header("Overview")
-    _render_overview(outputs, summary_tables)
-    st.header("Revenue & Energy")
-    _render_revenue_and_energy(outputs)
-    st.header("Operating Costs")
-    _render_operating_costs(outputs)
-    st.header("Capital & Debt")
-    _render_capital_and_debt(outputs)
-    st.header("Cash Flow & Returns")
-    _render_cash_flows(outputs)
-    st.header("Data & Downloads")
-    _render_data_and_downloads(outputs, summary_tables)
-elif selected_page == "Financial Performance":
-    _render_financial_performance(outputs)
-elif selected_page == "Financial Position":
-    _render_financial_position(outputs)
-elif selected_page == "Cash Flow Statement":
-    _render_cash_flow_statement(outputs)
-elif selected_page == "Sensitivity Analyses":
-    _render_sensitivity_analysis(assumptions, outputs)
-elif selected_page == "Scenario / IFs Analysis":
-    _render_scenario_analysis(assumptions, outputs)
-elif selected_page == "Monte Carlo Simulation":
-    _render_monte_carlo(assumptions)
-else:
-    _render_break_even(outputs)
+for page_name, tab in zip(PAGE_OPTIONS, tabs):
+    with tab:
+        if page_name == "Input Landing Page":
+            _render_input_landing(assumptions, outputs)
+        elif page_name == "Key Metrics Dashboard":
+            st.header("Overview")
+            _render_overview(outputs, summary_tables)
+            st.header("Revenue & Energy")
+            _render_revenue_and_energy(outputs)
+            st.header("Operating Costs")
+            _render_operating_costs(outputs)
+            st.header("Capital & Debt")
+            _render_capital_and_debt(outputs)
+            st.header("Cash Flow & Returns")
+            _render_cash_flows(outputs)
+            st.header("Data & Downloads")
+            _render_data_and_downloads(outputs, summary_tables)
+        elif page_name == "Financial Performance":
+            _render_financial_performance(outputs)
+        elif page_name == "Financial Position":
+            _render_financial_position(outputs)
+        elif page_name == "Cash Flow Statement":
+            _render_cash_flow_statement(outputs)
+        elif page_name == "Sensitivity Analyses":
+            _render_sensitivity_analysis(assumptions, outputs)
+        elif page_name == "Scenario / IFs Analysis":
+            _render_scenario_analysis(assumptions, outputs)
+        elif page_name == "Monte Carlo Simulation":
+            _render_monte_carlo(assumptions)
+        else:
+            _render_break_even(outputs)
 
-st.success("Model run complete. Adjust the assumptions in the sidebar to refresh the outputs.")
+st.sidebar.success("Model run complete. Adjust the assumptions to refresh outputs.")
