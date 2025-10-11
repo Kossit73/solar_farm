@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -104,28 +104,620 @@ def _downloadable_csv(df: pd.DataFrame) -> bytes:
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
 
 
+GenericTableRow = Dict[str, object]
+
+
+_TABLE_TYPE_LABELS = {"number": "Number", "percent": "Percent", "boolean": "Boolean"}
+
+
+CORE_ASSUMPTION_DEFAULTS: List[GenericTableRow] = [
+    {"label": "Discount Rate", "value": 0.10, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
+    {"label": "Exit EBITDA Multiple", "value": 5.0, "input_type": "number", "min": 0.0, "step": 0.5},
+    {"label": "Include Terminal Value", "value": True, "input_type": "boolean"},
+    {"label": "Terminal Growth Rate", "value": 0.02, "input_type": "percent", "min": 0.0, "max": 0.25, "step": 0.005},
+]
+
+
+GLOBAL_DEFAULTS: List[GenericTableRow] = [
+    {"label": "Income Tax Rate", "value": 0.25, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
+    {"label": "Capital Gains Tax Rate", "value": 0.10, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
+    {"label": "Investor Share", "value": 0.95, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
+    {"label": "Owner Share", "value": 0.05, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
+]
+
+
+ENERGY_DEFAULTS: List[GenericTableRow] = [
+    {"label": "Capacity (MW)", "value": 10.0, "input_type": "number", "min": 0.0, "step": 0.5},
+    {"label": "Capacity Factor", "value": 0.145, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.005},
+    {"label": "Annual Degradation", "value": 0.005, "input_type": "percent", "min": 0.0, "max": 0.10, "step": 0.001},
+]
+
+
+REVENUE_DEFAULTS: List[GenericTableRow] = [
+    {"label": "Share of Output via PPA", "value": 0.90, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.05},
+    {"label": "Year 1 PPA Rate ($/MWh)", "value": 160.0, "input_type": "number", "min": 0.0, "step": 5.0},
+    {"label": "PPA Annual Escalation", "value": 0.015, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
+    {"label": "Year 1 Merchant Rate ($/MWh)", "value": 56.58, "input_type": "number", "min": 0.0, "step": 1.0},
+    {"label": "Merchant Annual Escalation", "value": 0.015, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
+    {"label": "Year 1 REC Price ($/MWh)", "value": 40.0, "input_type": "number", "min": 0.0, "step": 1.0},
+    {"label": "REC Annual Escalation", "value": 0.02, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
+]
+
+
+LABOUR_DEFAULTS = [
+    {"role": "Production Manager", "annual_cost": 1_000.0},
+    {"role": "Production Operators", "annual_cost": 1_000.0},
+    {"role": "Process Engineer", "annual_cost": 1_000.0},
+    {"role": "Process Technician", "annual_cost": 1_000.0},
+]
+
+
+FIXED_VARIABLE_DEFAULTS = [
+    {"product": "Tablets", "fixed_cost": 0.0, "variable_cost": 0.05},
+    {"product": "Capsules", "fixed_cost": 0.0, "variable_cost": 0.065},
+    {"product": "Liquid", "fixed_cost": 0.0, "variable_cost": 1.525},
+    {"product": "Ointment", "fixed_cost": 0.0, "variable_cost": 3.026},
+]
+
+
+ACCOUNTS_RECEIVABLE_DEFAULTS = [
+    {"year": 2024, "days_in_year": 366, "receivable_days": 45, "prepaid_expense_days": 30, "other_asset_days": 5},
+    {"year": 2025, "days_in_year": 365, "receivable_days": 45, "prepaid_expense_days": 30, "other_asset_days": 5},
+]
+
+
+INVENTORY_PAYABLE_DEFAULTS = [
+    {"year": 2024, "days_in_year": 366, "inventory_days": 50, "accounts_payable_days": 45},
+    {"year": 2025, "days_in_year": 365, "inventory_days": 50, "accounts_payable_days": 45},
+]
+
+
+FIXED_ASSET_DEFAULTS = [
+    {
+        "asset_type": "Land",
+        "method": "Straight-Line",
+        "year": 2024,
+        "acquisition": 1_000_000.0,
+        "asset_life": 20.0,
+        "net_book_value": 1_000_000.0,
+        "depreciation_rate": 0.05,
+        "total_asset_cost": 1_000_000.0,
+        "total_depreciation": 0.0,
+        "cumulative_depreciation": 0.0,
+        "ending_book_value": 1_000_000.0,
+    },
+    {
+        "asset_type": "GMP Facility",
+        "method": "Straight-Line",
+        "year": 2024,
+        "acquisition": 2_500_000.0,
+        "asset_life": 15.0,
+        "net_book_value": 2_500_000.0,
+        "depreciation_rate": 0.067,
+        "total_asset_cost": 2_500_000.0,
+        "total_depreciation": 0.0,
+        "cumulative_depreciation": 0.0,
+        "ending_book_value": 2_500_000.0,
+    },
+]
+
+
+def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None:
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(defaults)
+
+
+def _render_label_value_table(title: str, state_key: str, defaults: List[GenericTableRow]) -> None:
+    _ensure_table_state(state_key, defaults)
+    st.markdown(f"### {title}")
+    rows = st.session_state[state_key]
+    updated_rows: List[GenericTableRow] = []
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_label, col_type, col_value, col_remove = st.columns([3, 1.5, 2, 1])
+            label = col_label.text_input(
+                "Label",
+                value=str(row.get("label", "")),
+                key=f"{state_key}_label_{idx}",
+                label_visibility="collapsed",
+            )
+
+            type_options = list(_TABLE_TYPE_LABELS.keys())
+            current_type = str(row.get("input_type", "number"))
+            if current_type not in type_options:
+                current_type = "number"
+            type_index = type_options.index(current_type)
+            input_type = col_type.selectbox(
+                "Type",
+                type_options,
+                index=type_index,
+                key=f"{state_key}_type_{idx}",
+                format_func=lambda opt: _TABLE_TYPE_LABELS[opt],
+                label_visibility="collapsed",
+            )
+
+            value_key = f"{state_key}_value_{idx}"
+            if input_type == "boolean":
+                value = col_value.checkbox(
+                    "Value",
+                    value=bool(row.get("value", False)),
+                    key=value_key,
+                    label_visibility="collapsed",
+                )
+            else:
+                number_kwargs: Dict[str, float | str] = {}
+                if row.get("min") is not None:
+                    number_kwargs["min_value"] = float(row["min"])
+                if row.get("max") is not None:
+                    number_kwargs["max_value"] = float(row["max"])
+                step = float(row.get("step", 0.01 if input_type == "percent" else 1.0))
+                number_kwargs["step"] = step
+                if row.get("format"):
+                    number_kwargs["format"] = str(row["format"])
+                value = col_value.number_input(
+                    "Value",
+                    value=float(row.get("value", 0.0)),
+                    key=value_key,
+                    label_visibility="collapsed",
+                    **number_kwargs,
+                )
+
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append(
+            {
+                "label": label,
+                "input_type": input_type,
+                "value": value,
+                **{k: v for k, v in row.items() if k not in {"label", "input_type", "value"}},
+            }
+        )
+
+    st.session_state[state_key] = updated_rows
+
+    if st.button(f"Add {title} Row", key=f"{state_key}_add"):
+        st.session_state[state_key].append({"label": "New Item", "input_type": "number", "value": 0.0, "step": 0.1})
+
+
+def _render_projection_horizon_section() -> None:
+    st.markdown("### Projection Horizon")
+    if "projection_start_year" not in st.session_state:
+        st.session_state["projection_start_year"] = 2024
+    if "projection_end_year" not in st.session_state:
+        st.session_state["projection_end_year"] = 2033
+
+    start_year_options = list(range(2020, 2051))
+    start_year = st.selectbox(
+        "Start Year",
+        options=start_year_options,
+        index=start_year_options.index(st.session_state["projection_start_year"]),
+        key="projection_start_year",
+        help="Select the first year in the forecast horizon.",
+    )
+    end_year_options = list(range(start_year + 1, start_year + 21))
+    if st.session_state["projection_end_year"] not in end_year_options:
+        st.session_state["projection_end_year"] = end_year_options[-1]
+    st.selectbox(
+        "End Year",
+        options=end_year_options,
+        index=end_year_options.index(st.session_state["projection_end_year"]),
+        key="projection_end_year",
+        help="Choose the final year for the projection horizon (up to 20 years).",
+    )
+
+
+def _render_labour_structure_section() -> None:
+    state_key = "labour_structure"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(LABOUR_DEFAULTS)
+
+    st.markdown("### Direct Labour Structure")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_role, col_cost, col_remove = st.columns([3, 2, 1])
+            role = col_role.text_input(
+                "Role",
+                value=str(row.get("role", "")),
+                key=f"{state_key}_role_{idx}",
+                label_visibility="collapsed",
+            )
+            annual_cost = col_cost.number_input(
+                "Annual Cost",
+                value=float(row.get("annual_cost", 0.0)),
+                key=f"{state_key}_cost_{idx}",
+                step=100.0,
+                min_value=0.0,
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append({"role": role, "annual_cost": annual_cost})
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Labour Role", key=f"{state_key}_add"):
+        st.session_state[state_key].append({"role": "New Role", "annual_cost": 0.0})
+
+
+def _render_fixed_variable_costs_section() -> None:
+    state_key = "fixed_variable_costs"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(FIXED_VARIABLE_DEFAULTS)
+
+    st.markdown("### Fixed & Variable Costs Input Table")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_product, col_fixed, col_variable, col_remove = st.columns([3, 2, 2, 1])
+            product = col_product.text_input(
+                "Product",
+                value=str(row.get("product", "")),
+                key=f"{state_key}_product_{idx}",
+                label_visibility="collapsed",
+            )
+            fixed_cost = col_fixed.number_input(
+                "Fixed Cost",
+                value=float(row.get("fixed_cost", 0.0)),
+                key=f"{state_key}_fixed_{idx}",
+                min_value=0.0,
+                step=0.01,
+                label_visibility="collapsed",
+            )
+            variable_cost = col_variable.number_input(
+                "Variable Cost",
+                value=float(row.get("variable_cost", 0.0)),
+                key=f"{state_key}_variable_{idx}",
+                min_value=0.0,
+                step=0.01,
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append({"product": product, "fixed_cost": fixed_cost, "variable_cost": variable_cost})
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Product Cost", key=f"{state_key}_add"):
+        st.session_state[state_key].append({"product": "New Product", "fixed_cost": 0.0, "variable_cost": 0.0})
+
+
+def _render_accounts_receivable_section() -> None:
+    state_key = "accounts_receivable"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(ACCOUNTS_RECEIVABLE_DEFAULTS)
+
+    st.markdown("### Accounts Receivable Input Table")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    year_options = list(range(2024, 2051))
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_year, col_days, col_ar_days, col_prepaid, col_other, col_remove = st.columns([1.2, 1, 1, 1, 1, 0.8])
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Receivable year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+            days_in_year = col_days.number_input(
+                "Days in Year",
+                value=float(row.get("days_in_year", 365)),
+                key=f"{state_key}_days_{idx}",
+                min_value=360.0,
+                max_value=370.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            receivable_days = col_ar_days.number_input(
+                "Accounts Receivable Days",
+                value=float(row.get("receivable_days", 45)),
+                key=f"{state_key}_ar_{idx}",
+                min_value=0.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            prepaid_days = col_prepaid.number_input(
+                "Prepaid Expense Days",
+                value=float(row.get("prepaid_expense_days", 30)),
+                key=f"{state_key}_prepaid_{idx}",
+                min_value=0.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            other_days = col_other.number_input(
+                "Other Asset Days",
+                value=float(row.get("other_asset_days", 5)),
+                key=f"{state_key}_other_{idx}",
+                min_value=0.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append(
+            {
+                "year": year,
+                "days_in_year": days_in_year,
+                "receivable_days": receivable_days,
+                "prepaid_expense_days": prepaid_days,
+                "other_asset_days": other_days,
+            }
+        )
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Receivable Year", key=f"{state_key}_add"):
+        next_year = max(row["year"] for row in st.session_state[state_key]) + 1 if st.session_state[state_key] else 2024
+        st.session_state[state_key].append(
+            {
+                "year": next_year,
+                "days_in_year": 365,
+                "receivable_days": 45,
+                "prepaid_expense_days": 30,
+                "other_asset_days": 5,
+            }
+        )
+
+
+def _render_inventory_payables_section() -> None:
+    state_key = "inventory_payables"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(INVENTORY_PAYABLE_DEFAULTS)
+
+    st.markdown("### Inventory & Accounts Payable Input Table")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    year_options = list(range(2024, 2051))
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_year, col_days, col_inventory, col_payable, col_remove = st.columns([1.2, 1, 1, 1, 0.8])
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Inventory year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+            days_in_year = col_days.number_input(
+                "Days in Year",
+                value=float(row.get("days_in_year", 365)),
+                key=f"{state_key}_days_{idx}",
+                min_value=360.0,
+                max_value=370.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            inventory_days = col_inventory.number_input(
+                "Inventory Days",
+                value=float(row.get("inventory_days", 50)),
+                key=f"{state_key}_inventory_{idx}",
+                min_value=0.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            payable_days = col_payable.number_input(
+                "Accounts Payable Days",
+                value=float(row.get("accounts_payable_days", 45)),
+                key=f"{state_key}_payable_{idx}",
+                min_value=0.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append(
+            {
+                "year": year,
+                "days_in_year": days_in_year,
+                "inventory_days": inventory_days,
+                "accounts_payable_days": payable_days,
+            }
+        )
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Inventory Year", key=f"{state_key}_add"):
+        next_year = max(row["year"] for row in st.session_state[state_key]) + 1 if st.session_state[state_key] else 2024
+        st.session_state[state_key].append(
+            {
+                "year": next_year,
+                "days_in_year": 365,
+                "inventory_days": 50,
+                "accounts_payable_days": 45,
+            }
+        )
+
+
+def _render_fixed_assets_section() -> None:
+    state_key = "fixed_assets_schedule"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(FIXED_ASSET_DEFAULTS)
+
+    st.markdown("### Fixed Assets Schedule")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    method_options = ["Straight-Line", "Declining Balance"]
+    year_options = list(range(2024, 2051))
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            (
+                col_asset,
+                col_method,
+                col_year,
+                col_acq,
+                col_life,
+                col_nbv,
+                col_rate,
+                col_total_cost,
+                col_total_dep,
+                col_cum_dep,
+                col_end_nbv,
+                col_remove,
+            ) = st.columns([2.2, 1.5, 1, 1.5, 1, 1.5, 1, 1.5, 1.5, 1.5, 1.5, 0.8])
+
+            asset_type = col_asset.text_input(
+                "Asset Type",
+                value=str(row.get("asset_type", "")),
+                key=f"{state_key}_asset_{idx}",
+                label_visibility="collapsed",
+            )
+
+            method = str(row.get("method", method_options[0]))
+            if method not in method_options:
+                method = method_options[0]
+            method_value = col_method.selectbox(
+                "Method",
+                method_options,
+                index=method_options.index(method),
+                key=f"{state_key}_method_{idx}",
+                label_visibility="collapsed",
+            )
+
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+
+            acquisition = col_acq.number_input(
+                "Acquisition",
+                value=float(row.get("acquisition", 0.0)),
+                key=f"{state_key}_acq_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+            asset_life = col_life.number_input(
+                "Asset Life",
+                value=float(row.get("asset_life", 1.0)),
+                key=f"{state_key}_life_{idx}",
+                min_value=1.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+            net_book_value = col_nbv.number_input(
+                "Net Book Value",
+                value=float(row.get("net_book_value", 0.0)),
+                key=f"{state_key}_nbv_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+            depreciation_rate = col_rate.number_input(
+                "Depreciation Rate",
+                value=float(row.get("depreciation_rate", 0.0)),
+                key=f"{state_key}_rate_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.001,
+                label_visibility="collapsed",
+            )
+            total_asset_cost = col_total_cost.number_input(
+                "Total Asset cost",
+                value=float(row.get("total_asset_cost", 0.0)),
+                key=f"{state_key}_total_cost_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+            total_depreciation = col_total_dep.number_input(
+                "Total Depreciation",
+                value=float(row.get("total_depreciation", 0.0)),
+                key=f"{state_key}_total_dep_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+            cumulative_depreciation = col_cum_dep.number_input(
+                "Cumulative Depreciation",
+                value=float(row.get("cumulative_depreciation", 0.0)),
+                key=f"{state_key}_cum_dep_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+            ending_book_value = col_end_nbv.number_input(
+                "Net Book Value",
+                value=float(row.get("ending_book_value", 0.0)),
+                key=f"{state_key}_ending_nbv_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append(
+            {
+                "asset_type": asset_type,
+                "method": method_value,
+                "year": year,
+                "acquisition": acquisition,
+                "asset_life": asset_life,
+                "net_book_value": net_book_value,
+                "depreciation_rate": depreciation_rate,
+                "total_asset_cost": total_asset_cost,
+                "total_depreciation": total_depreciation,
+                "cumulative_depreciation": cumulative_depreciation,
+                "ending_book_value": ending_book_value,
+            }
+        )
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Fixed Asset", key=f"{state_key}_add"):
+        st.session_state[state_key].append(
+            {
+                "asset_type": "New Asset",
+                "method": method_options[0],
+                "year": year_options[0],
+                "acquisition": 0.0,
+                "asset_life": 1.0,
+                "net_book_value": 0.0,
+                "depreciation_rate": 0.0,
+                "total_asset_cost": 0.0,
+                "total_depreciation": 0.0,
+                "cumulative_depreciation": 0.0,
+                "ending_book_value": 0.0,
+            }
+        )
+
+
+def _get_row_value(state_key: str, label: str, default: float | bool, expected_type: type) -> float | bool:
+    rows = st.session_state.get(state_key, [])
+    for row in rows:
+        if row.get("label") == label:
+            value = row.get("value", default)
+            break
+    else:
+        return default
+
+    if expected_type is bool:
+        return bool(value)
+    try:
+        return expected_type(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]]:
     """Render the primary assumption inputs and return override values."""
-
-    default_inputs: Dict[str, float | bool] = {
-        "input_discount_rate": 0.10,
-        "input_exit_multiple": 5.0,
-        "input_include_terminal": True,
-        "input_terminal_growth": 0.02,
-        "input_capacity_mw": 10.0,
-        "input_capacity_factor": 0.145,
-        "input_degradation_rate": 0.005,
-        "input_ppa_share": 0.90,
-        "input_ppa_rate": 160.0,
-        "input_ppa_escalation": 0.015,
-        "input_merchant_rate": 56.58,
-        "input_merchant_escalation": 0.015,
-        "input_rec_rate": 40.0,
-        "input_rec_escalation": 0.02,
-    }
-
-    for key, value in default_inputs.items():
-        st.session_state.setdefault(key, value)
 
     st.subheader("Assumptions")
 
@@ -139,117 +731,16 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
         )
         st.caption("Limit 200MB per file · XLSX, XLSM, XLS")
 
-    with st.container(border=True):
-        st.markdown("#### Global")
-        global_cols = st.columns(4)
-        discount_rate = global_cols[0].number_input(
-            "Discount rate",
-            min_value=0.0,
-            max_value=1.0,
-            step=0.01,
-            format="%.2f",
-            key="input_discount_rate",
-        )
-        exit_multiple = global_cols[1].number_input(
-            "Exit EBITDA multiple",
-            min_value=0.0,
-            step=0.5,
-            key="input_exit_multiple",
-        )
-        include_terminal = global_cols[2].checkbox(
-            "Include terminal value",
-            key="input_include_terminal",
-        )
-        terminal_growth = global_cols[3].number_input(
-            "Terminal growth rate",
-            min_value=0.0,
-            max_value=0.10,
-            step=0.005,
-            format="%.3f",
-            key="input_terminal_growth",
-        )
-
-    with st.container(border=True):
-        st.markdown("#### Energy")
-        energy_cols = st.columns((1, 1, 1))
-        capacity_mw = energy_cols[0].number_input(
-            "Capacity (MW)",
-            min_value=1.0,
-            step=0.5,
-            key="input_capacity_mw",
-        )
-        capacity_factor = energy_cols[1].slider(
-            "Capacity factor",
-            min_value=0.05,
-            max_value=0.35,
-            step=0.005,
-            key="input_capacity_factor",
-        )
-        degradation_rate = energy_cols[2].slider(
-            "Annual degradation",
-            min_value=0.0,
-            max_value=0.05,
-            step=0.001,
-            key="input_degradation_rate",
-        )
-
-    with st.container(border=True):
-        st.markdown("#### Revenue")
-        share_col, rates_col = st.columns((1, 2))
-        ppa_share = share_col.slider(
-            "Share of output sold via PPA",
-            min_value=0.0,
-            max_value=1.0,
-            step=0.05,
-            key="input_ppa_share",
-        )
-
-        with rates_col:
-            rate_cols = st.columns(3)
-            ppa_rate = rate_cols[0].number_input(
-                "Year 1 PPA rate ($/MWh)",
-                min_value=0.0,
-                step=5.0,
-                key="input_ppa_rate",
-            )
-            ppa_escalation = rate_cols[1].number_input(
-                "PPA annual escalation",
-                min_value=0.0,
-                max_value=0.10,
-                step=0.005,
-                format="%.3f",
-                key="input_ppa_escalation",
-            )
-            rec_rate = rate_cols[2].number_input(
-                "Year 1 REC price ($/MWh)",
-                min_value=0.0,
-                step=1.0,
-                key="input_rec_rate",
-            )
-
-        escalation_cols = st.columns(3)
-        merchant_rate = escalation_cols[0].number_input(
-            "Year 1 merchant rate ($/MWh)",
-            min_value=0.0,
-            step=2.0,
-            key="input_merchant_rate",
-        )
-        merchant_escalation = escalation_cols[1].number_input(
-            "Merchant annual escalation",
-            min_value=0.0,
-            max_value=0.10,
-            step=0.005,
-            format="%.3f",
-            key="input_merchant_escalation",
-        )
-        rec_escalation = escalation_cols[2].number_input(
-            "REC annual escalation",
-            min_value=0.0,
-            max_value=0.10,
-            step=0.005,
-            format="%.3f",
-            key="input_rec_escalation",
-        )
+    _render_projection_horizon_section()
+    _render_label_value_table("Core Assumptions", "core_table", CORE_ASSUMPTION_DEFAULTS)
+    _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
+    _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
+    _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
+    _render_labour_structure_section()
+    _render_fixed_variable_costs_section()
+    _render_accounts_receivable_section()
+    _render_inventory_payables_section()
+    _render_fixed_assets_section()
 
     with st.container(border=True):
         st.markdown("#### Deployment")
@@ -264,20 +755,20 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
     excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
 
     overrides: Dict[str, float | bool] = {
-        "discount_rate": float(discount_rate),
-        "exit_multiple": float(exit_multiple),
-        "include_terminal": bool(include_terminal),
-        "terminal_growth_rate": float(terminal_growth),
-        "capacity_mw": float(capacity_mw),
-        "capacity_factor": float(capacity_factor),
-        "degradation_rate": float(degradation_rate),
-        "ppa_share": float(ppa_share),
-        "ppa_rate": float(ppa_rate),
-        "ppa_escalation": float(ppa_escalation),
-        "merchant_rate": float(merchant_rate),
-        "merchant_escalation": float(merchant_escalation),
-        "rec_rate": float(rec_rate),
-        "rec_escalation": float(rec_escalation),
+        "discount_rate": float(_get_row_value("core_table", "Discount Rate", 0.10, float)),
+        "exit_multiple": float(_get_row_value("core_table", "Exit EBITDA Multiple", 5.0, float)),
+        "include_terminal": bool(_get_row_value("core_table", "Include Terminal Value", True, bool)),
+        "terminal_growth_rate": float(_get_row_value("core_table", "Terminal Growth Rate", 0.02, float)),
+        "capacity_mw": float(_get_row_value("energy_table", "Capacity (MW)", 10.0, float)),
+        "capacity_factor": float(_get_row_value("energy_table", "Capacity Factor", 0.145, float)),
+        "degradation_rate": float(_get_row_value("energy_table", "Annual Degradation", 0.005, float)),
+        "ppa_share": float(_get_row_value("revenue_table", "Share of Output via PPA", 0.90, float)),
+        "ppa_rate": float(_get_row_value("revenue_table", "Year 1 PPA Rate ($/MWh)", 160.0, float)),
+        "ppa_escalation": float(_get_row_value("revenue_table", "PPA Annual Escalation", 0.015, float)),
+        "merchant_rate": float(_get_row_value("revenue_table", "Year 1 Merchant Rate ($/MWh)", 56.58, float)),
+        "merchant_escalation": float(_get_row_value("revenue_table", "Merchant Annual Escalation", 0.015, float)),
+        "rec_rate": float(_get_row_value("revenue_table", "Year 1 REC Price ($/MWh)", 40.0, float)),
+        "rec_escalation": float(_get_row_value("revenue_table", "REC Annual Escalation", 0.02, float)),
     }
 
     return excel_bytes, overrides
