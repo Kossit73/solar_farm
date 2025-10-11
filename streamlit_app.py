@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import tempfile
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
@@ -314,36 +315,175 @@ _TABLE_TYPE_LABELS = {"number": "Number", "percent": "Percent", "boolean": "Bool
 
 
 CORE_ASSUMPTION_DEFAULTS: List[GenericTableRow] = [
-    {"label": "Discount Rate", "value": 0.10, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
-    {"label": "Exit EBITDA Multiple", "value": 5.0, "input_type": "number", "min": 0.0, "step": 0.5},
-    {"label": "Include Terminal Value", "value": True, "input_type": "boolean"},
-    {"label": "Terminal Growth Rate", "value": 0.02, "input_type": "percent", "min": 0.0, "max": 0.25, "step": 0.005},
+    {
+        "id": "discount_rate",
+        "label": "Discount Rate",
+        "value": 0.10,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
+    {
+        "id": "exit_multiple",
+        "label": "Exit EBITDA Multiple",
+        "value": 5.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 0.5,
+    },
+    {
+        "id": "include_terminal",
+        "label": "Include Terminal Value",
+        "value": True,
+        "input_type": "boolean",
+    },
+    {
+        "id": "terminal_growth_rate",
+        "label": "Terminal Growth Rate",
+        "value": 0.02,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 0.25,
+        "step": 0.005,
+    },
 ]
 
 
 GLOBAL_DEFAULTS: List[GenericTableRow] = [
-    {"label": "Income Tax Rate", "value": 0.25, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
-    {"label": "Capital Gains Tax Rate", "value": 0.10, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
-    {"label": "Investor Share", "value": 0.95, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
-    {"label": "Owner Share", "value": 0.05, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.01},
+    {
+        "id": "income_tax_rate",
+        "label": "Income Tax Rate",
+        "value": 0.25,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
+    {
+        "id": "capital_gains_tax_rate",
+        "label": "Capital Gains Tax Rate",
+        "value": 0.10,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
+    {
+        "id": "investor_share",
+        "label": "Investor Share",
+        "value": 0.95,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
+    {
+        "id": "owner_share",
+        "label": "Owner Share",
+        "value": 0.05,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
 ]
 
 
 ENERGY_DEFAULTS: List[GenericTableRow] = [
-    {"label": "Capacity (MW)", "value": 10.0, "input_type": "number", "min": 0.0, "step": 0.5},
-    {"label": "Capacity Factor", "value": 0.145, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.005},
-    {"label": "Annual Degradation", "value": 0.005, "input_type": "percent", "min": 0.0, "max": 0.10, "step": 0.001},
+    {
+        "id": "capacity_mw",
+        "label": "Capacity (MW)",
+        "value": 10.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 0.5,
+    },
+    {
+        "id": "capacity_factor",
+        "label": "Capacity Factor",
+        "value": 0.145,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.005,
+    },
+    {
+        "id": "degradation_rate",
+        "label": "Annual Degradation",
+        "value": 0.005,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 0.10,
+        "step": 0.001,
+    },
 ]
 
 
 REVENUE_DEFAULTS: List[GenericTableRow] = [
-    {"label": "Share of Output via PPA", "value": 0.90, "input_type": "percent", "min": 0.0, "max": 1.0, "step": 0.05},
-    {"label": "Year 1 PPA Rate ($/MWh)", "value": 160.0, "input_type": "number", "min": 0.0, "step": 5.0},
-    {"label": "PPA Annual Escalation", "value": 0.015, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
-    {"label": "Year 1 Merchant Rate ($/MWh)", "value": 56.58, "input_type": "number", "min": 0.0, "step": 1.0},
-    {"label": "Merchant Annual Escalation", "value": 0.015, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
-    {"label": "Year 1 REC Price ($/MWh)", "value": 40.0, "input_type": "number", "min": 0.0, "step": 1.0},
-    {"label": "REC Annual Escalation", "value": 0.02, "input_type": "number", "min": 0.0, "max": 0.10, "step": 0.005, "format": "%.3f"},
+    {
+        "id": "ppa_share",
+        "label": "Share of Output via PPA",
+        "value": 0.90,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.05,
+    },
+    {
+        "id": "ppa_rate",
+        "label": "Year 1 PPA Rate ($/MWh)",
+        "value": 160.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 5.0,
+    },
+    {
+        "id": "ppa_escalation",
+        "label": "PPA Annual Escalation",
+        "value": 0.015,
+        "input_type": "number",
+        "min": 0.0,
+        "max": 0.10,
+        "step": 0.005,
+        "format": "%.3f",
+    },
+    {
+        "id": "merchant_rate",
+        "label": "Year 1 Merchant Rate ($/MWh)",
+        "value": 56.58,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 1.0,
+    },
+    {
+        "id": "merchant_escalation",
+        "label": "Merchant Annual Escalation",
+        "value": 0.015,
+        "input_type": "number",
+        "min": 0.0,
+        "max": 0.10,
+        "step": 0.005,
+        "format": "%.3f",
+    },
+    {
+        "id": "rec_rate",
+        "label": "Year 1 REC Price ($/MWh)",
+        "value": 40.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 1.0,
+    },
+    {
+        "id": "rec_escalation",
+        "label": "REC Annual Escalation",
+        "value": 0.02,
+        "input_type": "number",
+        "min": 0.0,
+        "max": 0.10,
+        "step": 0.005,
+        "format": "%.3f",
+    },
 ]
 
 
@@ -465,6 +605,9 @@ RISK_SCHEDULE_DEFAULTS = [
 def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None:
     if state_key not in st.session_state:
         st.session_state[state_key] = copy.deepcopy(defaults)
+    elif defaults and "id" in defaults[0]:
+        for row in st.session_state[state_key]:
+            row.setdefault("id", uuid.uuid4().hex)
 
 
 def _render_label_value_table(title: str, state_key: str, defaults: List[GenericTableRow]) -> None:
@@ -476,11 +619,11 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
     for idx, row in enumerate(rows):
         with st.container(border=True):
             col_label, col_type, col_value, col_remove = st.columns([3, 1.5, 2, 1])
+            row_id = row.get("id") or uuid.uuid4().hex
             label = col_label.text_input(
                 "Label",
                 value=str(row.get("label", "")),
                 key=f"{state_key}_label_{idx}",
-                label_visibility="collapsed",
             )
 
             type_options = list(_TABLE_TYPE_LABELS.keys())
@@ -494,7 +637,6 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
                 index=type_index,
                 key=f"{state_key}_type_{idx}",
                 format_func=lambda opt: _TABLE_TYPE_LABELS[opt],
-                label_visibility="collapsed",
             )
 
             value_key = f"{state_key}_value_{idx}"
@@ -503,7 +645,6 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
                     "Value",
                     value=bool(row.get("value", False)),
                     key=value_key,
-                    label_visibility="collapsed",
                 )
             else:
                 number_kwargs: Dict[str, float | str] = {}
@@ -519,7 +660,6 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
                     "Value",
                     value=float(row.get("value", 0.0)),
                     key=value_key,
-                    label_visibility="collapsed",
                     **number_kwargs,
                 )
 
@@ -528,17 +668,26 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
             continue
         updated_rows.append(
             {
+                "id": row_id,
                 "label": label,
                 "input_type": input_type,
                 "value": value,
-                **{k: v for k, v in row.items() if k not in {"label", "input_type", "value"}},
+                **{k: v for k, v in row.items() if k not in {"id", "label", "input_type", "value"}},
             }
         )
 
     st.session_state[state_key] = updated_rows
 
     if st.button(f"Add {title} Row", key=f"{state_key}_add"):
-        st.session_state[state_key].append({"label": "New Item", "input_type": "number", "value": 0.0, "step": 0.1})
+        st.session_state[state_key].append(
+            {
+                "id": uuid.uuid4().hex,
+                "label": "New Item",
+                "input_type": "number",
+                "value": 0.0,
+                "step": 0.1,
+            }
+        )
 
 
 def _render_seasonality_table() -> List[Dict[str, object]]:
@@ -558,7 +707,6 @@ def _render_seasonality_table() -> List[Dict[str, object]]:
                 "Month",
                 value=str(row.get("month", "")),
                 key=f"{state_key}_month_{idx}",
-                label_visibility="collapsed",
             )
             share = col_share.number_input(
                 "Share",
@@ -567,7 +715,6 @@ def _render_seasonality_table() -> List[Dict[str, object]]:
                 min_value=0.0,
                 max_value=1.0,
                 step=0.001,
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -634,7 +781,6 @@ def _render_labour_structure_section() -> None:
                 "Role",
                 value=str(row.get("role", "")),
                 key=f"{state_key}_role_{idx}",
-                label_visibility="collapsed",
             )
             annual_cost = col_cost.number_input(
                 "Annual Cost",
@@ -642,7 +788,6 @@ def _render_labour_structure_section() -> None:
                 key=f"{state_key}_cost_{idx}",
                 step=100.0,
                 min_value=0.0,
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -669,7 +814,6 @@ def _render_fixed_variable_costs_section() -> None:
                 "Product",
                 value=str(row.get("product", "")),
                 key=f"{state_key}_product_{idx}",
-                label_visibility="collapsed",
             )
             fixed_cost = col_fixed.number_input(
                 "Fixed Cost",
@@ -677,7 +821,6 @@ def _render_fixed_variable_costs_section() -> None:
                 key=f"{state_key}_fixed_{idx}",
                 min_value=0.0,
                 step=0.01,
-                label_visibility="collapsed",
             )
             variable_cost = col_variable.number_input(
                 "Variable Cost",
@@ -685,7 +828,6 @@ def _render_fixed_variable_costs_section() -> None:
                 key=f"{state_key}_variable_{idx}",
                 min_value=0.0,
                 step=0.01,
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -717,7 +859,6 @@ def _render_accounts_receivable_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
             days_in_year = col_days.number_input(
                 "Days in Year",
@@ -726,7 +867,6 @@ def _render_accounts_receivable_section() -> None:
                 min_value=360.0,
                 max_value=370.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             receivable_days = col_ar_days.number_input(
                 "Accounts Receivable Days",
@@ -734,7 +874,6 @@ def _render_accounts_receivable_section() -> None:
                 key=f"{state_key}_ar_{idx}",
                 min_value=0.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             prepaid_days = col_prepaid.number_input(
                 "Prepaid Expense Days",
@@ -742,7 +881,6 @@ def _render_accounts_receivable_section() -> None:
                 key=f"{state_key}_prepaid_{idx}",
                 min_value=0.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             other_days = col_other.number_input(
                 "Other Asset Days",
@@ -750,7 +888,6 @@ def _render_accounts_receivable_section() -> None:
                 key=f"{state_key}_other_{idx}",
                 min_value=0.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -799,7 +936,6 @@ def _render_inventory_payables_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
             days_in_year = col_days.number_input(
                 "Days in Year",
@@ -808,7 +944,6 @@ def _render_inventory_payables_section() -> None:
                 min_value=360.0,
                 max_value=370.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             inventory_days = col_inventory.number_input(
                 "Inventory Days",
@@ -816,7 +951,6 @@ def _render_inventory_payables_section() -> None:
                 key=f"{state_key}_inventory_{idx}",
                 min_value=0.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             payable_days = col_payable.number_input(
                 "Accounts Payable Days",
@@ -824,7 +958,6 @@ def _render_inventory_payables_section() -> None:
                 key=f"{state_key}_payable_{idx}",
                 min_value=0.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -882,7 +1015,6 @@ def _render_fixed_assets_section() -> None:
                 "Asset Type",
                 value=str(row.get("asset_type", "")),
                 key=f"{state_key}_asset_{idx}",
-                label_visibility="collapsed",
             )
 
             method = str(row.get("method", method_options[0]))
@@ -893,7 +1025,6 @@ def _render_fixed_assets_section() -> None:
                 method_options,
                 index=method_options.index(method),
                 key=f"{state_key}_method_{idx}",
-                label_visibility="collapsed",
             )
 
             current_year = int(row.get("year", year_options[0]))
@@ -904,7 +1035,6 @@ def _render_fixed_assets_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
 
             acquisition = col_acq.number_input(
@@ -913,7 +1043,6 @@ def _render_fixed_assets_section() -> None:
                 key=f"{state_key}_acq_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
             asset_life = col_life.number_input(
                 "Asset Life",
@@ -921,15 +1050,13 @@ def _render_fixed_assets_section() -> None:
                 key=f"{state_key}_life_{idx}",
                 min_value=1.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
             net_book_value = col_nbv.number_input(
-                "Net Book Value",
+                "Opening Net Book Value",
                 value=float(row.get("net_book_value", 0.0)),
                 key=f"{state_key}_nbv_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
             depreciation_rate = col_rate.number_input(
                 "Depreciation Rate",
@@ -938,15 +1065,13 @@ def _render_fixed_assets_section() -> None:
                 min_value=0.0,
                 max_value=1.0,
                 step=0.001,
-                label_visibility="collapsed",
             )
             total_asset_cost = col_total_cost.number_input(
-                "Total Asset cost",
+                "Total Asset Cost",
                 value=float(row.get("total_asset_cost", 0.0)),
                 key=f"{state_key}_total_cost_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
             total_depreciation = col_total_dep.number_input(
                 "Total Depreciation",
@@ -954,7 +1079,6 @@ def _render_fixed_assets_section() -> None:
                 key=f"{state_key}_total_dep_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
             cumulative_depreciation = col_cum_dep.number_input(
                 "Cumulative Depreciation",
@@ -962,15 +1086,13 @@ def _render_fixed_assets_section() -> None:
                 key=f"{state_key}_cum_dep_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
             ending_book_value = col_end_nbv.number_input(
-                "Net Book Value",
+                "Ending Net Book Value",
                 value=float(row.get("ending_book_value", 0.0)),
                 key=f"{state_key}_ending_nbv_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -1040,7 +1162,6 @@ def _render_loan_schedule_section() -> None:
                 "Facility Label",
                 value=str(row.get("name", f"Facility {idx + 1}")),
                 key=f"{state_key}_name_{idx}",
-                label_visibility="collapsed",
             )
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
@@ -1050,7 +1171,6 @@ def _render_loan_schedule_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
 
             duration = int(max(1, row.get("duration_years", 1)))
@@ -1060,7 +1180,6 @@ def _render_loan_schedule_section() -> None:
                 key=f"{state_key}_duration_{idx}",
                 min_value=1.0,
                 step=1.0,
-                label_visibility="collapsed",
             )
 
             amount = col_amount.number_input(
@@ -1069,7 +1188,6 @@ def _render_loan_schedule_section() -> None:
                 key=f"{state_key}_amount_{idx}",
                 min_value=0.0,
                 step=1000.0,
-                label_visibility="collapsed",
             )
 
             rate = col_rate.number_input(
@@ -1080,7 +1198,6 @@ def _render_loan_schedule_section() -> None:
                 max_value=1.0,
                 step=0.005,
                 format="%.3f",
-                label_visibility="collapsed",
             )
 
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
@@ -1189,7 +1306,6 @@ def _render_tax_schedule_section() -> None:
                 "Tax label",
                 value=str(row.get("name", f"Tax {idx + 1}")),
                 key=f"{state_key}_label_{idx}",
-                label_visibility="collapsed",
             )
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
@@ -1199,7 +1315,6 @@ def _render_tax_schedule_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
             tax_rate = col_rate.number_input(
                 "Tax rate",
@@ -1209,7 +1324,6 @@ def _render_tax_schedule_section() -> None:
                 max_value=1.0,
                 step=0.005,
                 format="%.3f",
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -1254,7 +1368,6 @@ def _render_inflation_schedule_section() -> None:
                 "Inflation label",
                 value=str(row.get("name", f"Inflation {idx + 1}")),
                 key=f"{state_key}_label_{idx}",
-                label_visibility="collapsed",
             )
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
@@ -1264,7 +1377,6 @@ def _render_inflation_schedule_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
             rate = col_rate.number_input(
                 "Rate",
@@ -1274,7 +1386,6 @@ def _render_inflation_schedule_section() -> None:
                 max_value=1.0,
                 step=0.005,
                 format="%.3f",
-                label_visibility="collapsed",
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -1322,7 +1433,6 @@ def _render_risk_schedule_section() -> None:
                 "Risk label",
                 value=str(row.get("name", f"Risk {idx + 1}")),
                 key=f"{state_key}_label_{idx}",
-                label_visibility="collapsed",
             )
 
             current_year = int(row.get("year", year_options[0]))
@@ -1333,7 +1443,6 @@ def _render_risk_schedule_section() -> None:
                 options=year_options,
                 index=year_options.index(current_year),
                 key=f"{state_key}_year_{idx}",
-                label_visibility="collapsed",
             )
 
             inherent = col_inherent.number_input(
@@ -1344,7 +1453,6 @@ def _render_risk_schedule_section() -> None:
                 max_value=1.0,
                 step=0.005,
                 format="%.3f",
-                label_visibility="collapsed",
             )
             climate = col_climate.number_input(
                 "Climate Risk",
@@ -1354,7 +1462,6 @@ def _render_risk_schedule_section() -> None:
                 max_value=1.0,
                 step=0.005,
                 format="%.3f",
-                label_visibility="collapsed",
             )
             political = col_political.number_input(
                 "Political Risk",
@@ -1364,7 +1471,6 @@ def _render_risk_schedule_section() -> None:
                 max_value=1.0,
                 step=0.005,
                 format="%.3f",
-                label_visibility="collapsed",
             )
 
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
@@ -1405,10 +1511,10 @@ def _render_risk_schedule_section() -> None:
         st.dataframe(risk_df, use_container_width=True)
 
 
-def _get_row_value(state_key: str, label: str, default: float | bool, expected_type: type) -> float | bool:
+def _get_row_value(state_key: str, field_id: str, default: float | bool, expected_type: type) -> float | bool:
     rows = st.session_state.get(state_key, [])
     for row in rows:
-        if row.get("label") == label:
+        if row.get("id") == field_id or row.get("label") == field_id:
             value = row.get("value", default)
             break
     else:
@@ -1478,26 +1584,26 @@ def _render_assumption_controls() -> tuple[
     excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
 
     overrides: Dict[str, float | bool] = {
-        "discount_rate": float(_get_row_value("core_table", "Discount Rate", 0.10, float)),
-        "exit_multiple": float(_get_row_value("core_table", "Exit EBITDA Multiple", 5.0, float)),
-        "include_terminal": bool(_get_row_value("core_table", "Include Terminal Value", True, bool)),
-        "terminal_growth_rate": float(_get_row_value("core_table", "Terminal Growth Rate", 0.02, float)),
-        "income_tax_rate": float(_get_row_value("global_table", "Income Tax Rate", 0.25, float)),
+        "discount_rate": float(_get_row_value("core_table", "discount_rate", 0.10, float)),
+        "exit_multiple": float(_get_row_value("core_table", "exit_multiple", 5.0, float)),
+        "include_terminal": bool(_get_row_value("core_table", "include_terminal", True, bool)),
+        "terminal_growth_rate": float(_get_row_value("core_table", "terminal_growth_rate", 0.02, float)),
+        "income_tax_rate": float(_get_row_value("global_table", "income_tax_rate", 0.25, float)),
         "capital_gains_tax_rate": float(
-            _get_row_value("global_table", "Capital Gains Tax Rate", 0.10, float)
+            _get_row_value("global_table", "capital_gains_tax_rate", 0.10, float)
         ),
-        "investor_share": float(_get_row_value("global_table", "Investor Share", 0.95, float)),
-        "owner_share": float(_get_row_value("global_table", "Owner Share", 0.05, float)),
-        "capacity_mw": float(_get_row_value("energy_table", "Capacity (MW)", 10.0, float)),
-        "capacity_factor": float(_get_row_value("energy_table", "Capacity Factor", 0.145, float)),
-        "degradation_rate": float(_get_row_value("energy_table", "Annual Degradation", 0.005, float)),
-        "ppa_share": float(_get_row_value("revenue_table", "Share of Output via PPA", 0.90, float)),
-        "ppa_rate": float(_get_row_value("revenue_table", "Year 1 PPA Rate ($/MWh)", 160.0, float)),
-        "ppa_escalation": float(_get_row_value("revenue_table", "PPA Annual Escalation", 0.015, float)),
-        "merchant_rate": float(_get_row_value("revenue_table", "Year 1 Merchant Rate ($/MWh)", 56.58, float)),
-        "merchant_escalation": float(_get_row_value("revenue_table", "Merchant Annual Escalation", 0.015, float)),
-        "rec_rate": float(_get_row_value("revenue_table", "Year 1 REC Price ($/MWh)", 40.0, float)),
-        "rec_escalation": float(_get_row_value("revenue_table", "REC Annual Escalation", 0.02, float)),
+        "investor_share": float(_get_row_value("global_table", "investor_share", 0.95, float)),
+        "owner_share": float(_get_row_value("global_table", "owner_share", 0.05, float)),
+        "capacity_mw": float(_get_row_value("energy_table", "capacity_mw", 10.0, float)),
+        "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
+        "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
+        "ppa_share": float(_get_row_value("revenue_table", "ppa_share", 0.90, float)),
+        "ppa_rate": float(_get_row_value("revenue_table", "ppa_rate", 160.0, float)),
+        "ppa_escalation": float(_get_row_value("revenue_table", "ppa_escalation", 0.015, float)),
+        "merchant_rate": float(_get_row_value("revenue_table", "merchant_rate", 56.58, float)),
+        "merchant_escalation": float(_get_row_value("revenue_table", "merchant_escalation", 0.015, float)),
+        "rec_rate": float(_get_row_value("revenue_table", "rec_rate", 40.0, float)),
+        "rec_escalation": float(_get_row_value("revenue_table", "rec_escalation", 0.02, float)),
         "start_year": float(start_year),
         "end_year": float(end_year),
     }
