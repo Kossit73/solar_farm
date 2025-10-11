@@ -848,6 +848,87 @@ RISK_SCHEDULE_DEFAULTS = [
 ]
 
 
+MONTE_CARLO_DISTRIBUTION_OPTIONS: Dict[str, str] = {
+    "normal": "Normal (mean & std)",
+    "uniform": "Uniform (min & max)",
+    "triangular": "Triangular (min, mode, max)",
+}
+
+
+MONTE_CARLO_DRIVER_DEFAULTS: List[Dict[str, object]] = [
+    {
+        "id": "mc_capacity",
+        "variable": "capacity_factor",
+        "distribution": "normal",
+        "mean": 1.0,
+        "std_dev": 0.04,
+        "min": 0.85,
+        "max": 1.10,
+    },
+    {
+        "id": "mc_ppa",
+        "variable": "ppa_rate",
+        "distribution": "normal",
+        "mean": 1.0,
+        "std_dev": 0.05,
+        "min": 0.80,
+        "max": 1.20,
+    },
+    {
+        "id": "mc_capex",
+        "variable": "capex_total",
+        "distribution": "triangular",
+        "min": 0.90,
+        "mode": 1.00,
+        "max": 1.10,
+    },
+]
+
+
+MONTE_CARLO_METRIC_DEFAULTS: List[str] = [
+    "project_npv",
+    "project_irr",
+    "equity_irr",
+    "project_payback_months",
+]
+
+
+MONTE_CARLO_CONFIG_DEFAULT: Dict[str, object] = {
+    "iterations": 500,
+    "seed": 42,
+    "drivers": copy.deepcopy(MONTE_CARLO_DRIVER_DEFAULTS),
+    "metrics": MONTE_CARLO_METRIC_DEFAULTS.copy(),
+}
+
+
+MONTE_CARLO_STATE_KEY = "monte_carlo_config"
+
+
+BREAK_EVEN_STATE_KEY = "break_even_inputs"
+
+
+BREAK_EVEN_DEFAULTS: List[Dict[str, object]] = [
+    {
+        "id": "be_ppa",
+        "product": "Utility PPA",
+        "fixed_cost": 650_000.0,
+        "variable_cost": 18.0,
+        "selling_price": 45.0,
+        "target_profit": 150_000.0,
+        "expected_volume": 120_000.0,
+    },
+    {
+        "id": "be_merchant",
+        "product": "Merchant Sales",
+        "fixed_cost": 420_000.0,
+        "variable_cost": 20.0,
+        "selling_price": 55.0,
+        "target_profit": 100_000.0,
+        "expected_volume": 95_000.0,
+    },
+]
+
+
 def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None:
     if state_key not in st.session_state:
         st.session_state[state_key] = copy.deepcopy(defaults)
@@ -2907,40 +2988,401 @@ def _render_scenario_analysis(base_assumptions: Assumptions, outputs: ModelOutpu
     )
 
 
+def _render_monte_carlo_configuration() -> Dict[str, object]:
+    """Capture Monte Carlo configuration, drivers, and metric outputs."""
+
+    if MONTE_CARLO_STATE_KEY not in st.session_state:
+        st.session_state[MONTE_CARLO_STATE_KEY] = copy.deepcopy(MONTE_CARLO_CONFIG_DEFAULT)
+
+    config: Dict[str, object] = st.session_state[MONTE_CARLO_STATE_KEY]
+    config.setdefault("drivers", copy.deepcopy(MONTE_CARLO_DRIVER_DEFAULTS))
+    config.setdefault("metrics", MONTE_CARLO_METRIC_DEFAULTS.copy())
+    config.setdefault("iterations", MONTE_CARLO_CONFIG_DEFAULT["iterations"])
+    config.setdefault("seed", MONTE_CARLO_CONFIG_DEFAULT["seed"])
+
+    st.subheader("Monte Carlo Simulation Configuration")
+    st.caption("Control the randomised drivers, iteration count, and captured metrics.")
+
+    col_iterations, col_seed = st.columns([1, 1])
+    iterations = col_iterations.number_input(
+        "Iterations",
+        min_value=100,
+        max_value=5000,
+        step=100,
+        value=int(config.get("iterations", MONTE_CARLO_CONFIG_DEFAULT["iterations"])),
+        help="Number of random scenarios to evaluate.",
+    )
+    seed = col_seed.number_input(
+        "Random Seed",
+        min_value=0,
+        max_value=10_000,
+        step=1,
+        value=int(config.get("seed", MONTE_CARLO_CONFIG_DEFAULT["seed"])),
+        help="Seed used to reproduce simulation results.",
+    )
+    config["iterations"] = int(iterations)
+    config["seed"] = int(seed)
+
+    metric_keys = list(MetricLabels.keys())
+    selected_metrics = st.multiselect(
+        "Metric outputs",
+        options=metric_keys,
+        default=[m for m in config.get("metrics", []) if m in metric_keys] or MONTE_CARLO_METRIC_DEFAULTS,
+        format_func=lambda key: MetricLabels.get(key, key.replace("_", " ").title()),
+        help="Choose which metrics to summarise from the simulation results.",
+    )
+    config["metrics"] = selected_metrics or MONTE_CARLO_METRIC_DEFAULTS.copy()
+
+    driver_rows: List[Dict[str, object]] = list(config.get("drivers", []))
+    updated_drivers: List[Dict[str, object]] = []
+    option_keys = list(SENSITIVITY_OPTIONS.keys())
+    if not option_keys:
+        st.warning("No variables available for simulation.")
+        config["drivers"] = []
+    else:
+        for idx, row in enumerate(driver_rows):
+            with st.container(border=True):
+                col_variable, col_dist, col_p1, col_p2, col_p3, col_p4, col_remove = st.columns(
+                    [2.2, 1.6, 1.2, 1.2, 1.2, 1.2, 0.8]
+                )
+                current_var = str(row.get("variable", option_keys[0]))
+                if current_var not in option_keys:
+                    current_var = option_keys[0]
+                variable_key = col_variable.selectbox(
+                    "Variable",
+                    options=option_keys,
+                    index=option_keys.index(current_var),
+                    key=f"{MONTE_CARLO_STATE_KEY}_variable_{idx}",
+                    format_func=lambda opt: SENSITIVITY_OPTIONS[opt][0],
+                )
+
+                distribution_options = list(MONTE_CARLO_DISTRIBUTION_OPTIONS.keys())
+                current_dist = str(row.get("distribution", distribution_options[0]))
+                if current_dist not in distribution_options:
+                    current_dist = distribution_options[0]
+                distribution = col_dist.selectbox(
+                    "Distribution",
+                    options=distribution_options,
+                    index=distribution_options.index(current_dist),
+                    key=f"{MONTE_CARLO_STATE_KEY}_distribution_{idx}",
+                    format_func=lambda opt: MONTE_CARLO_DISTRIBUTION_OPTIONS[opt],
+                )
+
+                params: Dict[str, float] = {}
+                if distribution == "normal":
+                    params["mean"] = col_p1.number_input(
+                        "Mean multiplier",
+                        value=float(row.get("mean", 1.0)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_mean_{idx}",
+                    )
+                    params["std_dev"] = col_p2.number_input(
+                        "Std dev",
+                        value=float(row.get("std_dev", 0.05)),
+                        min_value=0.0,
+                        step=0.005,
+                        key=f"{MONTE_CARLO_STATE_KEY}_std_{idx}",
+                    )
+                    params["min"] = col_p3.number_input(
+                        "Min clip",
+                        value=float(row.get("min", 0.5)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_min_{idx}",
+                    )
+                    params["max"] = col_p4.number_input(
+                        "Max clip",
+                        value=float(row.get("max", 1.5)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_max_{idx}",
+                    )
+                elif distribution == "uniform":
+                    params["min"] = col_p1.number_input(
+                        "Min multiplier",
+                        value=float(row.get("min", 0.9)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_umin_{idx}",
+                    )
+                    params["max"] = col_p2.number_input(
+                        "Max multiplier",
+                        value=float(row.get("max", 1.1)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_umax_{idx}",
+                    )
+                else:  # triangular
+                    params["min"] = col_p1.number_input(
+                        "Min multiplier",
+                        value=float(row.get("min", 0.9)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_tmin_{idx}",
+                    )
+                    params["mode"] = col_p2.number_input(
+                        "Mode",
+                        value=float(row.get("mode", 1.0)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_tmode_{idx}",
+                    )
+                    params["max"] = col_p3.number_input(
+                        "Max multiplier",
+                        value=float(row.get("max", 1.1)),
+                        step=0.01,
+                        key=f"{MONTE_CARLO_STATE_KEY}_tmax_{idx}",
+                    )
+                    params["std_dev"] = float(row.get("std_dev", 0.0))
+
+                remove_clicked = col_remove.button(
+                    "Remove",
+                    key=f"{MONTE_CARLO_STATE_KEY}_remove_{idx}",
+                )
+
+            if remove_clicked:
+                continue
+
+            updated_row = {
+                "id": row.get("id") or uuid.uuid4().hex,
+                "variable": variable_key,
+                "distribution": distribution,
+            }
+            updated_row.update(params)
+            updated_drivers.append(updated_row)
+
+        st.session_state[MONTE_CARLO_STATE_KEY]["drivers"] = updated_drivers
+
+        if st.button("Add Simulation Variable", key=f"{MONTE_CARLO_STATE_KEY}_add"):
+            st.session_state[MONTE_CARLO_STATE_KEY]["drivers"].append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "variable": option_keys[0],
+                    "distribution": "normal",
+                    "mean": 1.0,
+                    "std_dev": 0.05,
+                    "min": 0.8,
+                    "max": 1.2,
+                }
+            )
+
+    return copy.deepcopy(st.session_state[MONTE_CARLO_STATE_KEY])
+
+
+def _sample_monte_carlo_multiplier(rng: np.random.Generator, row: Dict[str, object]) -> float:
+    """Generate a multiplier for the selected driver based on its configuration."""
+
+    distribution = str(row.get("distribution", "normal"))
+    if distribution == "normal":
+        mean = _coerce_float(row.get("mean"), 1.0)
+        std_dev = max(0.0, _coerce_float(row.get("std_dev"), 0.05))
+        value = float(rng.normal(mean, std_dev))
+        min_clip = row.get("min")
+        max_clip = row.get("max")
+        if min_clip is not None:
+            value = max(_coerce_float(min_clip, value), value)
+        if max_clip is not None:
+            value = min(_coerce_float(max_clip, value), value)
+        return value
+
+    if distribution == "uniform":
+        low = _coerce_float(row.get("min"), 0.9)
+        high = _coerce_float(row.get("max"), 1.1)
+        if high <= low:
+            high = low + 1e-6
+        return float(rng.uniform(low, high))
+
+    # Triangular distribution
+    low = _coerce_float(row.get("min"), 0.9)
+    high = _coerce_float(row.get("max"), max(low + 1e-6, 1.1))
+    mode = _coerce_float(row.get("mode"), (low + high) / 2)
+    mode = min(max(mode, low), high)
+    return float(rng.triangular(low, mode, high))
+
+
+def _render_break_even_configuration() -> List[Dict[str, object]]:
+    """Render editable break-even input rows and return the stored configuration."""
+
+    if BREAK_EVEN_STATE_KEY not in st.session_state:
+        st.session_state[BREAK_EVEN_STATE_KEY] = copy.deepcopy(BREAK_EVEN_DEFAULTS)
+
+    rows: List[Dict[str, object]] = st.session_state[BREAK_EVEN_STATE_KEY]
+    updated_rows: List[Dict[str, object]] = []
+
+    st.subheader("Break-even Analysis Inputs")
+    st.caption("Capture fixed costs, contribution margins, and target profit by product or revenue stream.")
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            cols = st.columns([2.0, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8])
+            product = cols[0].text_input(
+                "Product",
+                value=str(row.get("product", "")),
+                key=f"{BREAK_EVEN_STATE_KEY}_product_{idx}",
+            )
+            fixed_cost = cols[1].number_input(
+                "Fixed Cost",
+                value=float(row.get("fixed_cost", 0.0)),
+                min_value=0.0,
+                step=1_000.0,
+                key=f"{BREAK_EVEN_STATE_KEY}_fixed_{idx}",
+            )
+            variable_cost = cols[2].number_input(
+                "Variable Cost",
+                value=float(row.get("variable_cost", 0.0)),
+                min_value=0.0,
+                step=0.01,
+                key=f"{BREAK_EVEN_STATE_KEY}_variable_{idx}",
+            )
+            selling_price = cols[3].number_input(
+                "Selling Price",
+                value=float(row.get("selling_price", 0.0)),
+                min_value=0.0,
+                step=0.01,
+                key=f"{BREAK_EVEN_STATE_KEY}_price_{idx}",
+            )
+            target_profit = cols[4].number_input(
+                "Target Profit",
+                value=float(row.get("target_profit", 0.0)),
+                min_value=0.0,
+                step=1_000.0,
+                key=f"{BREAK_EVEN_STATE_KEY}_profit_{idx}",
+            )
+            expected_volume = cols[5].number_input(
+                "Expected Volume",
+                value=float(row.get("expected_volume", 0.0)),
+                min_value=0.0,
+                step=1_000.0,
+                key=f"{BREAK_EVEN_STATE_KEY}_volume_{idx}",
+            )
+            remove_clicked = cols[6].button("Remove", key=f"{BREAK_EVEN_STATE_KEY}_remove_{idx}")
+
+        if remove_clicked:
+            continue
+
+        updated_rows.append(
+            {
+                "id": row.get("id") or uuid.uuid4().hex,
+                "product": product,
+                "fixed_cost": fixed_cost,
+                "variable_cost": variable_cost,
+                "selling_price": selling_price,
+                "target_profit": target_profit,
+                "expected_volume": expected_volume,
+            }
+        )
+
+    st.session_state[BREAK_EVEN_STATE_KEY] = updated_rows
+
+    with st.container(border=True):
+        st.markdown("#### Add Break-even Input")
+        add_cols = st.columns([2.0, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8])
+        new_product = add_cols[0].text_input(
+            "Product Name",
+            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_product", ""),
+            key=f"{BREAK_EVEN_STATE_KEY}_new_product",
+        )
+        new_fixed = add_cols[1].number_input(
+            "Fixed Cost",
+            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_fixed", 0.0),
+            min_value=0.0,
+            step=1_000.0,
+            key=f"{BREAK_EVEN_STATE_KEY}_new_fixed",
+        )
+        new_variable = add_cols[2].number_input(
+            "Variable Cost",
+            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_variable", 0.0),
+            min_value=0.0,
+            step=0.01,
+            key=f"{BREAK_EVEN_STATE_KEY}_new_variable",
+        )
+        new_price = add_cols[3].number_input(
+            "Selling Price",
+            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_price", 0.0),
+            min_value=0.0,
+            step=0.01,
+            key=f"{BREAK_EVEN_STATE_KEY}_new_price",
+        )
+        new_target = add_cols[4].number_input(
+            "Target Profit",
+            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_target", 0.0),
+            min_value=0.0,
+            step=1_000.0,
+            key=f"{BREAK_EVEN_STATE_KEY}_new_target",
+        )
+        new_volume = add_cols[5].number_input(
+            "Expected Volume",
+            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_volume", 0.0),
+            min_value=0.0,
+            step=1_000.0,
+            key=f"{BREAK_EVEN_STATE_KEY}_new_volume",
+        )
+
+        add_clicked = add_cols[6].button("Add", key=f"{BREAK_EVEN_STATE_KEY}_add")
+
+    if add_clicked and new_product:
+        st.session_state[BREAK_EVEN_STATE_KEY].append(
+            {
+                "id": uuid.uuid4().hex,
+                "product": new_product,
+                "fixed_cost": float(new_fixed),
+                "variable_cost": float(new_variable),
+                "selling_price": float(new_price),
+                "target_profit": float(new_target),
+                "expected_volume": float(new_volume),
+            }
+        )
+        for suffix, reset_value in (
+            ("new_product", ""),
+            ("new_fixed", 0.0),
+            ("new_variable", 0.0),
+            ("new_price", 0.0),
+            ("new_target", 0.0),
+            ("new_volume", 0.0),
+        ):
+            st.session_state[f"{BREAK_EVEN_STATE_KEY}_{suffix}"] = reset_value
+        st.experimental_rerun()
+
+    return copy.deepcopy(st.session_state[BREAK_EVEN_STATE_KEY])
+
+
 def _render_monte_carlo(base_assumptions: Assumptions) -> None:
     """Run a Monte Carlo analysis across core drivers."""
 
     st.header("Monte Carlo Simulation")
-    iterations = st.slider("Number of simulations", min_value=100, max_value=400, value=200, step=50)
-    rng = np.random.default_rng(42)
+    config = _render_monte_carlo_configuration()
 
-    results = []
+    iterations = int(config.get("iterations", MONTE_CARLO_CONFIG_DEFAULT["iterations"]))
+    seed = int(config.get("seed", MONTE_CARLO_CONFIG_DEFAULT["seed"]))
+    drivers: List[Dict[str, object]] = list(config.get("drivers", []))
+    metric_keys: List[str] = [m for m in config.get("metrics", []) if m in MetricLabels]
+
+    if not drivers:
+        st.info("Add at least one simulation variable to run the Monte Carlo analysis.")
+        return
+
+    if not metric_keys:
+        metric_keys = MONTE_CARLO_METRIC_DEFAULTS
+
+    rng = np.random.default_rng(seed)
+    results: List[Dict[str, float]] = []
     progress = st.progress(0.0)
+
     for i in range(iterations):
 
-        def modifier(a: Assumptions) -> None:
-            a.energy.capacity_factor = max(0.01, min(0.9, a.energy.capacity_factor * rng.normal(1.0, 0.05)))
-            a.revenue.ppa.rate_curve.initial *= rng.normal(1.0, 0.05)
-            a.revenue.merchant.rate_curve.initial *= rng.normal(1.0, 0.05)
-            for item in a.capex_items:
-                item.amount *= rng.normal(1.0, 0.05)
-            for item in a.fixed_opex:
-                item.annual_cost *= rng.normal(1.0, 0.05)
-            for item in a.variable_opex:
-                item.cost_per_mwh *= rng.normal(1.0, 0.05)
+        def modifier(a: Assumptions, driver_rows: List[Dict[str, object]] = drivers) -> None:
+            for driver in driver_rows:
+                variable = driver.get("variable")
+                if not variable or variable not in SENSITIVITY_OPTIONS:
+                    continue
+                multiplier = _sample_monte_carlo_multiplier(rng, driver)
+                apply_fn = SENSITIVITY_OPTIONS[variable][1]
+                apply_fn(a, multiplier)
 
         metrics = _simulate_metrics(base_assumptions, modifier)
-        results.append(
-            {
-                "Project NPV": metrics.get("project_npv", float("nan")),
-                "Project IRR": metrics.get("project_irr", float("nan")),
-                "Equity IRR": metrics.get("equity_irr", float("nan")),
-                "Payback (months)": metrics.get("project_payback_months", float("nan")),
-            }
-        )
-        progress.progress((i + 1) / iterations)
+        results.append({MetricLabels[key]: metrics.get(key, float("nan")) for key in metric_keys})
+        progress.progress((i + 1) / max(1, iterations))
 
     progress.empty()
+
+    if not results:
+        st.warning("No simulation results generated.")
+        return
+
     mc_df = pd.DataFrame(results)
 
     st.markdown("#### Distribution Summary")
@@ -2948,20 +3390,36 @@ def _render_monte_carlo(base_assumptions: Assumptions) -> None:
     quantiles = mc_df.quantile([0.1, 0.5, 0.9]).rename(index={0.1: "P10", 0.5: "Median", 0.9: "P90"})
     st.dataframe(pd.concat([summary, quantiles]), use_container_width=True)
 
-    st.markdown("#### Project NPV Distribution")
-    hist, bins = np.histogram(mc_df["Project NPV"].dropna(), bins=20)
+    chart_metric_options = list(mc_df.columns)
+    selected_metric = st.selectbox(
+        "Distribution metric",
+        options=chart_metric_options,
+        index=0,
+        key="monte_carlo_metric_selection",
+    )
+
+    st.markdown(f"#### {selected_metric} Distribution")
+    hist, bins = np.histogram(mc_df[selected_metric].dropna(), bins=20)
     if hist.size:
         midpoints = (bins[:-1] + bins[1:]) / 2
-        hist_df = pd.DataFrame({"Count": hist}, index=pd.Index(midpoints, name="NPV"))
+        hist_df = pd.DataFrame({"Count": hist}, index=pd.Index(midpoints, name=selected_metric))
         st.bar_chart(hist_df)
     else:
-        st.info("Not enough data to plot histogram.")
+        st.info("Not enough data to plot histogram for the selected metric.")
+
+    st.download_button(
+        "Download Simulation Results",
+        data=mc_df.to_csv(index=False).encode("utf-8"),
+        file_name="monte_carlo_results.csv",
+        mime="text/csv",
+    )
 
 
 def _render_break_even(outputs: ModelOutputs) -> None:
     """Show break-even and payback diagnostics."""
 
     st.header("Break-Even & Payback")
+    break_even_rows = _render_break_even_configuration()
     monthly = outputs.monthly_results
     cumulative_equity = monthly["equity_cash_flow"].cumsum()
     breakeven_mask = cumulative_equity >= 0
@@ -2975,6 +3433,86 @@ def _render_break_even(outputs: ModelOutputs) -> None:
         "Payback",
         _format_metric("project_payback_months", metrics.get("project_payback_months", float("nan"))),
     )
+
+    if break_even_rows:
+        records: List[Dict[str, object]] = []
+        issues: List[str] = []
+        for row in break_even_rows:
+            product = str(row.get("product", "")).strip() or "Unlabelled"
+            fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
+            variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
+            price = max(0.0, _coerce_float(row.get("selling_price")))
+            target_profit = max(0.0, _coerce_float(row.get("target_profit")))
+            expected_volume = max(0.0, _coerce_float(row.get("expected_volume")))
+
+            contribution = price - variable_cost
+            contribution_ratio = contribution / price if price > 0 else float("nan")
+
+            if contribution <= 0:
+                break_even_units = float("nan")
+                break_even_revenue = float("nan")
+                margin_of_safety = float("nan")
+                margin_of_safety_ratio = float("nan")
+                issues.append(f"{product}: Contribution margin must be positive to compute break-even.")
+            else:
+                break_even_units = (fixed_cost + target_profit) / contribution
+                break_even_revenue = break_even_units * price
+                margin_of_safety = expected_volume - break_even_units if expected_volume > 0 else float("nan")
+                if expected_volume > 0 and not math.isnan(margin_of_safety):
+                    margin_of_safety_ratio = margin_of_safety / expected_volume
+                else:
+                    margin_of_safety_ratio = float("nan")
+
+            records.append(
+                {
+                    "Product": product,
+                    "Fixed Cost": fixed_cost,
+                    "Variable Cost": variable_cost,
+                    "Selling Price": price,
+                    "Contribution Margin": contribution,
+                    "Contribution Margin %": contribution_ratio,
+                    "Target Profit": target_profit,
+                    "Expected Volume": expected_volume,
+                    "Break-even Units": break_even_units,
+                    "Break-even Revenue": break_even_revenue,
+                    "Margin of Safety": margin_of_safety,
+                    "Margin of Safety %": margin_of_safety_ratio,
+                }
+            )
+
+        if records:
+            st.markdown("#### Break-even Results")
+            results_df = pd.DataFrame(records)
+            formatters = {
+                "Fixed Cost": "{:,.0f}".format,
+                "Variable Cost": "{:,.4f}".format,
+                "Selling Price": "{:,.4f}".format,
+                "Contribution Margin": "{:,.4f}".format,
+                "Contribution Margin %": "{:.2%}".format,
+                "Target Profit": "{:,.0f}".format,
+                "Expected Volume": "{:,.0f}".format,
+                "Break-even Units": "{:,.2f}".format,
+                "Break-even Revenue": "{:,.0f}".format,
+                "Margin of Safety": "{:,.2f}".format,
+                "Margin of Safety %": "{:.2%}".format,
+            }
+            st.dataframe(results_df.style.format(formatters), use_container_width=True)
+
+            chart_df = results_df.set_index("Product")[[
+                col for col in ["Break-even Units", "Expected Volume"] if col in results_df.columns
+            ]]
+            if not chart_df.empty:
+                st.bar_chart(chart_df, use_container_width=True)
+
+            st.download_button(
+                "Download Break-even Table",
+                data=results_df.to_csv(index=False).encode("utf-8"),
+                file_name="break_even_analysis.csv",
+                mime="text/csv",
+            )
+
+        for message in issues:
+            st.error(message)
 
     if breakeven_date is not None:
         st.success(f"Break-even reached in {breakeven_date.strftime('%B %Y')}")
