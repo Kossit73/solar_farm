@@ -234,25 +234,43 @@ FIXED_ASSET_DEFAULTS = [
 
 
 LOAN_SCHEDULE_DEFAULTS = [
-    {"year": 2024, "duration_years": 5, "amount": 2_000_000.0, "interest_rate": 0.06},
+    {
+        "name": "Construction Loan",
+        "year": 2024,
+        "duration_years": 5,
+        "amount": 2_000_000.0,
+        "interest_rate": 0.06,
+    },
 ]
 
 
 TAX_SCHEDULE_DEFAULTS = [
-    {"year": 2024, "tax_rate": 0.25},
-    {"year": 2025, "tax_rate": 0.25},
+    {"name": "Federal Tax", "year": 2024, "tax_rate": 0.25},
+    {"name": "Federal Tax", "year": 2025, "tax_rate": 0.25},
 ]
 
 
 INFLATION_SCHEDULE_DEFAULTS = [
-    {"year": 2024, "rate": 0.025},
-    {"year": 2025, "rate": 0.025},
+    {"name": "Base Inflation", "year": 2024, "rate": 0.025},
+    {"name": "Base Inflation", "year": 2025, "rate": 0.025},
 ]
 
 
 RISK_SCHEDULE_DEFAULTS = [
-    {"year": 2024, "inherent_risk": 0.05, "climate_risk": 0.02, "political_risk": 0.03},
-    {"year": 2025, "inherent_risk": 0.05, "climate_risk": 0.02, "political_risk": 0.03},
+    {
+        "name": "Baseline",
+        "year": 2024,
+        "inherent_risk": 0.05,
+        "climate_risk": 0.02,
+        "political_risk": 0.03,
+    },
+    {
+        "name": "Baseline",
+        "year": 2025,
+        "inherent_risk": 0.05,
+        "climate_risk": 0.02,
+        "political_risk": 0.03,
+    },
 ]
 
 
@@ -827,8 +845,14 @@ def _render_loan_schedule_section() -> None:
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
-            col_year, col_duration, col_amount, col_rate, col_remove = st.columns([1, 1, 1.4, 1, 0.6])
+            col_label, col_year, col_duration, col_amount, col_rate, col_remove = st.columns([1.6, 1, 1, 1.2, 1, 0.6])
 
+            name = col_label.text_input(
+                "Facility Label",
+                value=str(row.get("name", f"Facility {idx + 1}")),
+                key=f"{state_key}_name_{idx}",
+                label_visibility="collapsed",
+            )
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
                 current_year = year_options[0]
@@ -877,6 +901,7 @@ def _render_loan_schedule_section() -> None:
 
         updated_rows.append(
             {
+                "name": name,
                 "year": int(year),
                 "duration_years": int(duration_years),
                 "amount": float(amount),
@@ -894,6 +919,7 @@ def _render_loan_schedule_section() -> None:
         )
         st.session_state[state_key].append(
             {
+                "name": f"Facility {len(st.session_state[state_key]) + 1}",
                 "year": next_year,
                 "duration_years": 5,
                 "amount": 1_000_000.0,
@@ -907,6 +933,7 @@ def _render_loan_schedule_section() -> None:
         duration = max(1, int(facility["duration_years"]))
         amount = float(facility["amount"])
         rate = float(facility.get("interest_rate", st.session_state["loan_base_rate"]))
+        facility_name = str(facility.get("name", "Facility"))
 
         remaining = amount
         principal_payment = amount / duration if duration else amount
@@ -917,6 +944,7 @@ def _render_loan_schedule_section() -> None:
             remaining = max(0.0, remaining - principal_payment)
             schedule_rows.append(
                 {
+                    "Facility": facility_name,
                     "Facility Year": year,
                     "Period": period_year,
                     "Interest Payment": interest_payment,
@@ -967,7 +995,13 @@ def _render_tax_schedule_section() -> None:
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
-            col_year, col_rate, col_remove = st.columns([1, 1, 0.6])
+            col_label, col_year, col_rate, col_remove = st.columns([1.4, 1, 1, 0.6])
+            label = col_label.text_input(
+                "Tax label",
+                value=str(row.get("name", f"Tax {idx + 1}")),
+                key=f"{state_key}_label_{idx}",
+                label_visibility="collapsed",
+            )
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
                 current_year = year_options[0]
@@ -991,7 +1025,7 @@ def _render_tax_schedule_section() -> None:
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
             continue
-        updated_rows.append({"year": int(year), "tax_rate": float(tax_rate)})
+        updated_rows.append({"name": label, "year": int(year), "tax_rate": float(tax_rate)})
 
     st.session_state[state_key] = updated_rows
 
@@ -1001,7 +1035,13 @@ def _render_tax_schedule_section() -> None:
             if st.session_state[state_key]
             else 2024
         )
-        st.session_state[state_key].append({"year": next_year, "tax_rate": st.session_state["tax_base_rate"]})
+        st.session_state[state_key].append(
+            {
+                "name": f"Tax {len(st.session_state[state_key]) + 1}",
+                "year": next_year,
+                "tax_rate": st.session_state["tax_base_rate"],
+            }
+        )
 
     if st.session_state[state_key]:
         tax_df = pd.DataFrame(st.session_state[state_key])
@@ -1020,7 +1060,13 @@ def _render_inflation_schedule_section() -> None:
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
-            col_year, col_rate, col_remove = st.columns([1, 1, 0.6])
+            col_label, col_year, col_rate, col_remove = st.columns([1.4, 1, 1, 0.6])
+            label = col_label.text_input(
+                "Inflation label",
+                value=str(row.get("name", f"Inflation {idx + 1}")),
+                key=f"{state_key}_label_{idx}",
+                label_visibility="collapsed",
+            )
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
                 current_year = year_options[0]
@@ -1044,7 +1090,7 @@ def _render_inflation_schedule_section() -> None:
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
             continue
-        updated_rows.append({"year": int(year), "rate": float(rate)})
+        updated_rows.append({"name": label, "year": int(year), "rate": float(rate)})
 
     st.session_state[state_key] = updated_rows
 
@@ -1054,7 +1100,13 @@ def _render_inflation_schedule_section() -> None:
             if st.session_state[state_key]
             else 2024
         )
-        st.session_state[state_key].append({"year": next_year, "rate": 0.0})
+        st.session_state[state_key].append(
+            {
+                "name": f"Inflation {len(st.session_state[state_key]) + 1}",
+                "year": next_year,
+                "rate": 0.0,
+            }
+        )
 
     if st.session_state[state_key]:
         inflation_df = pd.DataFrame(st.session_state[state_key])
@@ -1073,7 +1125,16 @@ def _render_risk_schedule_section() -> None:
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
-            col_year, col_inherent, col_climate, col_political, col_remove = st.columns([1, 1, 1, 1, 0.6])
+            col_label, col_year, col_inherent, col_climate, col_political, col_remove = st.columns(
+                [1.4, 1, 1, 1, 1, 0.6]
+            )
+
+            label = col_label.text_input(
+                "Risk label",
+                value=str(row.get("name", f"Risk {idx + 1}")),
+                key=f"{state_key}_label_{idx}",
+                label_visibility="collapsed",
+            )
 
             current_year = int(row.get("year", year_options[0]))
             if current_year not in year_options:
@@ -1124,6 +1185,7 @@ def _render_risk_schedule_section() -> None:
 
         updated_rows.append(
             {
+                "name": label,
                 "year": int(year),
                 "inherent_risk": float(inherent),
                 "climate_risk": float(climate),
@@ -1141,6 +1203,7 @@ def _render_risk_schedule_section() -> None:
         )
         st.session_state[state_key].append(
             {
+                "name": f"Risk {len(st.session_state[state_key]) + 1}",
                 "year": next_year,
                 "inherent_risk": 0.0,
                 "climate_risk": 0.0,
