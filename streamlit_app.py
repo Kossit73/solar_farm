@@ -233,6 +233,29 @@ FIXED_ASSET_DEFAULTS = [
 ]
 
 
+LOAN_SCHEDULE_DEFAULTS = [
+    {"year": 2024, "duration_years": 5, "amount": 2_000_000.0, "interest_rate": 0.06},
+]
+
+
+TAX_SCHEDULE_DEFAULTS = [
+    {"year": 2024, "tax_rate": 0.25},
+    {"year": 2025, "tax_rate": 0.25},
+]
+
+
+INFLATION_SCHEDULE_DEFAULTS = [
+    {"year": 2024, "rate": 0.025},
+    {"year": 2025, "rate": 0.025},
+]
+
+
+RISK_SCHEDULE_DEFAULTS = [
+    {"year": 2024, "inherent_risk": 0.05, "climate_risk": 0.02, "political_risk": 0.03},
+    {"year": 2025, "inherent_risk": 0.05, "climate_risk": 0.02, "political_risk": 0.03},
+]
+
+
 def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None:
     if state_key not in st.session_state:
         st.session_state[state_key] = copy.deepcopy(defaults)
@@ -780,6 +803,356 @@ def _render_fixed_assets_section() -> None:
         )
 
 
+def _render_loan_schedule_section() -> None:
+    state_key = "loan_schedule"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(LOAN_SCHEDULE_DEFAULTS)
+    if "loan_base_rate" not in st.session_state:
+        st.session_state["loan_base_rate"] = 0.06
+
+    st.markdown("### Loan Schedule")
+    base_rate_col, _ = st.columns([1, 3])
+    st.session_state["loan_base_rate"] = base_rate_col.number_input(
+        "Base Interest Rate",
+        value=float(st.session_state["loan_base_rate"]),
+        min_value=0.0,
+        max_value=1.0,
+        step=0.005,
+        format="%.3f",
+    )
+
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    year_options = list(range(2024, 2051))
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_year, col_duration, col_amount, col_rate, col_remove = st.columns([1, 1, 1.4, 1, 0.6])
+
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+
+            duration = int(max(1, row.get("duration_years", 1)))
+            duration_years = col_duration.number_input(
+                "Duration",
+                value=float(duration),
+                key=f"{state_key}_duration_{idx}",
+                min_value=1.0,
+                step=1.0,
+                label_visibility="collapsed",
+            )
+
+            amount = col_amount.number_input(
+                "Senior Debt Amount",
+                value=float(row.get("amount", 0.0)),
+                key=f"{state_key}_amount_{idx}",
+                min_value=0.0,
+                step=1000.0,
+                label_visibility="collapsed",
+            )
+
+            rate = col_rate.number_input(
+                "Interest Rate",
+                value=float(row.get("interest_rate", st.session_state["loan_base_rate"])),
+                key=f"{state_key}_rate_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.005,
+                format="%.3f",
+                label_visibility="collapsed",
+            )
+
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+
+        if remove_clicked:
+            continue
+
+        updated_rows.append(
+            {
+                "year": int(year),
+                "duration_years": int(duration_years),
+                "amount": float(amount),
+                "interest_rate": float(rate),
+            }
+        )
+
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Loan Facility", key=f"{state_key}_add"):
+        next_year = (
+            max(row["year"] for row in st.session_state[state_key]) + 1
+            if st.session_state[state_key]
+            else 2024
+        )
+        st.session_state[state_key].append(
+            {
+                "year": next_year,
+                "duration_years": 5,
+                "amount": 1_000_000.0,
+                "interest_rate": st.session_state["loan_base_rate"],
+            }
+        )
+
+    schedule_rows: List[Dict[str, object]] = []
+    for facility in st.session_state[state_key]:
+        year = int(facility["year"])
+        duration = max(1, int(facility["duration_years"]))
+        amount = float(facility["amount"])
+        rate = float(facility.get("interest_rate", st.session_state["loan_base_rate"]))
+
+        remaining = amount
+        principal_payment = amount / duration if duration else amount
+
+        for offset in range(duration):
+            period_year = year + offset
+            interest_payment = remaining * rate
+            remaining = max(0.0, remaining - principal_payment)
+            schedule_rows.append(
+                {
+                    "Facility Year": year,
+                    "Period": period_year,
+                    "Interest Payment": interest_payment,
+                    "Principal Payment": principal_payment,
+                    "Remaining Balance": remaining,
+                }
+            )
+
+    if schedule_rows:
+        schedule_df = pd.DataFrame(schedule_rows)
+        st.markdown("#### Senior Debt Amortisation Schedule")
+        st.dataframe(schedule_df, use_container_width=True)
+    else:
+        st.info("Add a loan facility to build the amortisation schedule.")
+
+
+def _render_tax_schedule_section() -> None:
+    state_key = "tax_schedule"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(TAX_SCHEDULE_DEFAULTS)
+    if "tax_base_rate" not in st.session_state:
+        st.session_state["tax_base_rate"] = 0.25
+    if "tax_timing_adjustment" not in st.session_state:
+        st.session_state["tax_timing_adjustment"] = 0.5
+
+    st.markdown("### Tax Schedule")
+    base_col, timing_col = st.columns(2)
+    st.session_state["tax_base_rate"] = base_col.number_input(
+        "Base tax rate",
+        value=float(st.session_state["tax_base_rate"]),
+        min_value=0.0,
+        max_value=1.0,
+        step=0.005,
+        format="%.3f",
+    )
+    st.session_state["tax_timing_adjustment"] = timing_col.number_input(
+        "Timing adjustment",
+        value=float(st.session_state["tax_timing_adjustment"]),
+        min_value=0.0,
+        max_value=1.0,
+        step=0.005,
+        format="%.3f",
+    )
+
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    year_options = list(range(2024, 2051))
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_year, col_rate, col_remove = st.columns([1, 1, 0.6])
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+            tax_rate = col_rate.number_input(
+                "Tax rate",
+                value=float(row.get("tax_rate", st.session_state["tax_base_rate"])),
+                key=f"{state_key}_rate_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.005,
+                format="%.3f",
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append({"year": int(year), "tax_rate": float(tax_rate)})
+
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Tax Year", key=f"{state_key}_add"):
+        next_year = (
+            max(row["year"] for row in st.session_state[state_key]) + 1
+            if st.session_state[state_key]
+            else 2024
+        )
+        st.session_state[state_key].append({"year": next_year, "tax_rate": st.session_state["tax_base_rate"]})
+
+    if st.session_state[state_key]:
+        tax_df = pd.DataFrame(st.session_state[state_key])
+        st.dataframe(tax_df, use_container_width=True)
+
+
+def _render_inflation_schedule_section() -> None:
+    state_key = "inflation_schedule"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(INFLATION_SCHEDULE_DEFAULTS)
+
+    st.markdown("### Inflation Schedule")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    year_options = list(range(2024, 2051))
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_year, col_rate, col_remove = st.columns([1, 1, 0.6])
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+            rate = col_rate.number_input(
+                "Rate",
+                value=float(row.get("rate", 0.0)),
+                key=f"{state_key}_rate_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.005,
+                format="%.3f",
+                label_visibility="collapsed",
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+        if remove_clicked:
+            continue
+        updated_rows.append({"year": int(year), "rate": float(rate)})
+
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Inflation Year", key=f"{state_key}_add"):
+        next_year = (
+            max(row["year"] for row in st.session_state[state_key]) + 1
+            if st.session_state[state_key]
+            else 2024
+        )
+        st.session_state[state_key].append({"year": next_year, "rate": 0.0})
+
+    if st.session_state[state_key]:
+        inflation_df = pd.DataFrame(st.session_state[state_key])
+        st.dataframe(inflation_df, use_container_width=True)
+
+
+def _render_risk_schedule_section() -> None:
+    state_key = "risk_schedule"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(RISK_SCHEDULE_DEFAULTS)
+
+    st.markdown("### Risk Schedule")
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    year_options = list(range(2024, 2051))
+
+    for idx, row in enumerate(rows):
+        with st.container(border=True):
+            col_year, col_inherent, col_climate, col_political, col_remove = st.columns([1, 1, 1, 1, 0.6])
+
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{idx}",
+                label_visibility="collapsed",
+            )
+
+            inherent = col_inherent.number_input(
+                "Inherent Risk",
+                value=float(row.get("inherent_risk", 0.0)),
+                key=f"{state_key}_inherent_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.005,
+                format="%.3f",
+                label_visibility="collapsed",
+            )
+            climate = col_climate.number_input(
+                "Climate Risk",
+                value=float(row.get("climate_risk", 0.0)),
+                key=f"{state_key}_climate_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.005,
+                format="%.3f",
+                label_visibility="collapsed",
+            )
+            political = col_political.number_input(
+                "Political Risk",
+                value=float(row.get("political_risk", 0.0)),
+                key=f"{state_key}_political_{idx}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.005,
+                format="%.3f",
+                label_visibility="collapsed",
+            )
+
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+
+        if remove_clicked:
+            continue
+
+        updated_rows.append(
+            {
+                "year": int(year),
+                "inherent_risk": float(inherent),
+                "climate_risk": float(climate),
+                "political_risk": float(political),
+            }
+        )
+
+    st.session_state[state_key] = updated_rows
+
+    if st.button("Add Risk Year", key=f"{state_key}_add"):
+        next_year = (
+            max(row["year"] for row in st.session_state[state_key]) + 1
+            if st.session_state[state_key]
+            else 2024
+        )
+        st.session_state[state_key].append(
+            {
+                "year": next_year,
+                "inherent_risk": 0.0,
+                "climate_risk": 0.0,
+                "political_risk": 0.0,
+            }
+        )
+
+    if st.session_state[state_key]:
+        risk_df = pd.DataFrame(st.session_state[state_key])
+        st.dataframe(risk_df, use_container_width=True)
+
+
 def _get_row_value(state_key: str, label: str, default: float | bool, expected_type: type) -> float | bool:
     rows = st.session_state.get(state_key, [])
     for row in rows:
@@ -823,6 +1196,10 @@ def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]
     _render_accounts_receivable_section()
     _render_inventory_payables_section()
     _render_fixed_assets_section()
+    _render_loan_schedule_section()
+    _render_tax_schedule_section()
+    _render_inflation_schedule_section()
+    _render_risk_schedule_section()
 
     with st.container(border=True):
         st.markdown("#### Deployment")
