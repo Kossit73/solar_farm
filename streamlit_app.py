@@ -98,6 +98,146 @@ def _downloadable_csv(df: pd.DataFrame) -> bytes:
 
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
 
+
+def _render_overview(outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame]) -> None:
+    """Display the overview page with key metrics and highlights."""
+
+    st.subheader("Headline metrics")
+    metrics = outputs.metrics
+    metric_cols = st.columns(len(MetricLabels))
+    for col, (metric_key, label) in zip(metric_cols, MetricLabels.items()):
+        value = metrics.get(metric_key, float("nan"))
+        col.metric(label, _format_metric(metric_key, value))
+
+    st.divider()
+    st.subheader("Latest drivers")
+    st.dataframe(summary_tables["key_drivers"], use_container_width=True)
+
+    st.divider()
+    energy_chart, cashflow_chart = st.columns(2)
+    with energy_chart:
+        st.markdown("#### Energy production")
+        st.line_chart(outputs.monthly_results["energy_mwh"], use_container_width=True)
+    with cashflow_chart:
+        st.markdown("#### Equity cash flow")
+        st.area_chart(outputs.monthly_results["equity_cash_flow"], use_container_width=True)
+
+    st.divider()
+    st.subheader("Annual summary")
+    annual = summary_tables["annual_summary"]
+    st.dataframe(annual, use_container_width=True)
+
+
+def _render_revenue_and_energy(outputs: ModelOutputs) -> None:
+    """Display revenue composition and energy output analytics."""
+
+    monthly = outputs.monthly_results
+    st.subheader("Energy and revenue")
+
+    st.markdown("#### Monthly energy production")
+    st.line_chart(monthly["energy_mwh"], use_container_width=True)
+
+    revenue_cols = monthly.filter(like="revenue_")
+    if not revenue_cols.empty:
+        st.markdown("#### Revenue mix")
+        st.area_chart(revenue_cols, use_container_width=True)
+        annual_revenue = revenue_cols.resample("A").sum()
+        annual_revenue.index = annual_revenue.index.year
+        st.dataframe(annual_revenue, use_container_width=True)
+    else:
+        st.info("Revenue inputs were not available in the current run.")
+
+
+def _render_operating_costs(outputs: ModelOutputs) -> None:
+    """Display fixed and variable operating cost trends."""
+
+    monthly = outputs.monthly_results
+    opex_cols = monthly.filter(like="opex_")
+
+    st.subheader("Operating costs")
+    st.markdown("#### Total operating cost")
+    st.line_chart(monthly["total_opex"], use_container_width=True)
+
+    if not opex_cols.empty:
+        st.markdown("#### Cost breakdown")
+        st.area_chart(opex_cols, use_container_width=True)
+        annual_opex = opex_cols.resample("A").sum()
+        annual_opex.index = annual_opex.index.year
+        st.dataframe(annual_opex, use_container_width=True)
+    else:
+        st.info("No operating expense items were configured for this run.")
+
+
+def _render_capital_and_debt(outputs: ModelOutputs) -> None:
+    """Display capex profile and debt schedule insights."""
+
+    monthly = outputs.monthly_results
+    st.subheader("Capital expenditure and debt")
+
+    if "capex" in monthly.columns:
+        st.markdown("#### Monthly capex")
+        st.bar_chart(monthly[["capex"]], use_container_width=True)
+    else:
+        st.info("Capex profile not available.")
+
+    debt_cols = [col for col in ["debt_draw", "debt_principal", "debt_interest", "debt_balance"] if col in monthly.columns]
+    if debt_cols:
+        st.markdown("#### Debt schedule")
+        st.line_chart(monthly[debt_cols], use_container_width=True)
+        st.dataframe(monthly[debt_cols], use_container_width=True)
+    else:
+        st.info("Debt facilities are not part of the current assumption set.")
+
+
+def _render_cash_flows(outputs: ModelOutputs) -> None:
+    """Display free cash flow and equity distribution analytics."""
+
+    monthly = outputs.monthly_results
+    st.subheader("Cash flow & returns")
+
+    cash_cols = ["fcff", "equity_cash_flow", "investor_cash_flow", "owner_cash_flow"]
+    available_cash = [c for c in cash_cols if c in monthly.columns]
+
+    if available_cash:
+        st.markdown("#### Monthly cash flows")
+        st.area_chart(monthly[available_cash], use_container_width=True)
+
+        cumulative = monthly[available_cash].cumsum()
+        cumulative.columns = [f"cumulative_{col}" for col in cumulative.columns]
+        st.markdown("#### Cumulative cash flows")
+        st.line_chart(cumulative, use_container_width=True)
+        st.dataframe(cumulative, use_container_width=True)
+    else:
+        st.info("Cash flow outputs are not available for the current run.")
+
+
+def _render_data_and_downloads(outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame]) -> None:
+    """Expose the raw tables along with download buttons."""
+
+    st.subheader("Model tables")
+    st.markdown("#### Monthly detail")
+    st.dataframe(outputs.monthly_results, use_container_width=True)
+
+    st.markdown("#### Annual summary")
+    st.dataframe(outputs.annual_summary, use_container_width=True)
+
+    st.markdown("#### Metrics")
+    st.dataframe(summary_tables["metrics"], use_container_width=True)
+
+    st.divider()
+    st.subheader("Downloads")
+    st.write("Export CSV extracts for offline analysis.")
+    st.download_button(
+        "Download monthly results", data=_downloadable_csv(outputs.monthly_results), file_name="monthly_results.csv"
+    )
+    st.download_button(
+        "Download annual summary", data=_downloadable_csv(outputs.annual_summary), file_name="annual_summary.csv"
+    )
+    st.download_button(
+        "Download metrics", data=_downloadable_csv(summary_tables["metrics"]), file_name="metrics.csv"
+    )
+
+
 st.title("☀️ Solar Farm Financial Model")
 st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
 
@@ -143,6 +283,21 @@ with st.sidebar:
         """
     )
 
+    st.subheader("Navigation")
+    selected_page = st.radio(
+        "Select a page",
+        options=[
+            "Overview",
+            "Revenue & Energy",
+            "Operating Costs",
+            "Capital & Debt",
+            "Cash Flow & Returns",
+            "Data & Downloads",
+        ],
+        index=0,
+        key="page_selector",
+    )
+
 override_tuple = tuple(
     sorted(
         {
@@ -168,46 +323,17 @@ excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
 
 outputs, summary_tables = _run_model(excel_bytes, override_tuple)
 
-metrics = outputs.metrics
-metric_cols = st.columns(len(MetricLabels))
-for col, (metric_key, label) in zip(metric_cols, MetricLabels.items()):
-    value = metrics.get(metric_key, float("nan"))
-    col.metric(label, _format_metric(metric_key, value))
-
-energy_chart, cashflow_chart = st.columns(2)
-with energy_chart:
-    st.subheader("Energy generation (MWh)")
-    st.line_chart(outputs.monthly_results["energy_mwh"])
-with cashflow_chart:
-    st.subheader("Equity cash flow")
-    st.area_chart(outputs.monthly_results["equity_cash_flow"])
-
-summary_tab, monthly_tab, annual_tab, download_tab = st.tabs(
-    ["Summary tables", "Monthly results", "Annual summary", "Downloads"]
-)
-
-with summary_tab:
-    st.subheader("Key Drivers")
-    st.dataframe(summary_tables["key_drivers"], use_container_width=True)
-    st.subheader("Metrics")
-    st.dataframe(summary_tables["metrics"], use_container_width=True)
-
-with monthly_tab:
-    st.dataframe(outputs.monthly_results, use_container_width=True)
-
-with annual_tab:
-    st.dataframe(outputs.annual_summary, use_container_width=True)
-
-with download_tab:
-    st.write("Download CSV extracts for offline analysis.")
-    st.download_button(
-        "Download monthly results", data=_downloadable_csv(outputs.monthly_results), file_name="monthly_results.csv"
-    )
-    st.download_button(
-        "Download annual summary", data=_downloadable_csv(outputs.annual_summary), file_name="annual_summary.csv"
-    )
-    st.download_button(
-        "Download metrics", data=_downloadable_csv(summary_tables["metrics"]), file_name="metrics.csv"
-    )
+if selected_page == "Overview":
+    _render_overview(outputs, summary_tables)
+elif selected_page == "Revenue & Energy":
+    _render_revenue_and_energy(outputs)
+elif selected_page == "Operating Costs":
+    _render_operating_costs(outputs)
+elif selected_page == "Capital & Debt":
+    _render_capital_and_debt(outputs)
+elif selected_page == "Cash Flow & Returns":
+    _render_cash_flows(outputs)
+else:
+    _render_data_and_downloads(outputs, summary_tables)
 
 st.success("Model run complete. Adjust the assumptions in the sidebar to refresh the outputs.")
