@@ -195,6 +195,22 @@ class SolarFarmFinancialModel:
 
         return schedule
 
+    @staticmethod
+    def _level_payment(balance: float, periodic_rate: float, periods: int) -> float:
+        """Compute the constant payment needed to amortize a loan.
+
+        Replaces the deprecated ``numpy.pmt`` helper with an explicit
+        implementation to keep compatibility with modern NumPy releases.
+        """
+
+        if periods <= 0:
+            return 0.0
+        if abs(periodic_rate) < 1e-12:
+            return balance / periods
+
+        growth = (1 + periodic_rate) ** periods
+        return balance * periodic_rate * growth / (growth - 1)
+
     def _build_facility_schedule(self, facility: DebtFacility) -> pd.DataFrame:
         schedule = pd.DataFrame(0.0, index=self._timeline, columns=["debt_interest", "debt_principal", "debt_draw", "debt_balance"])
         start_idx = facility.start_month - 1
@@ -207,7 +223,7 @@ class SolarFarmFinancialModel:
         io_months = facility.interest_only_months
 
         payment_months = max(term_months - io_months, 1)
-        amortization_payment = np.pmt(monthly_rate, payment_months, -balance) if payment_months > 0 else 0.0
+        amortization_payment = self._level_payment(balance, monthly_rate, payment_months)
 
         for month_idx in range(start_idx, min(start_idx + term_months, len(schedule))):
             row = schedule.iloc[month_idx]
