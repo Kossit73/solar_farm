@@ -607,8 +607,31 @@ def _render_break_even(outputs: ModelOutputs) -> None:
     st.dataframe(cumulative_df, use_container_width=True)
 
 
-st.title("☀️ Solar Farm Financial Model")
+st.title("Solar Farm Financial Model")
 st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
+
+PAGE_OPTIONS = [
+    "Input Landing Page",
+    "Key Metrics Dashboard",
+    "Financial Performance",
+    "Financial Position",
+    "Cash Flow Statement",
+    "Sensitivity Analyses",
+    "Scenario / IFs Analysis",
+    "Monte Carlo Simulation",
+    "Break-Even & Payback",
+]
+
+selected_page = st.radio(
+    "Navigation",
+    options=PAGE_OPTIONS,
+    index=0,
+    horizontal=True,
+    label_visibility="collapsed",
+    key="top_navigation",
+)
+
+st.divider()
 
 with st.sidebar:
     st.header("Assumptions")
@@ -650,24 +673,6 @@ with st.sidebar:
 
         [Deploy on Streamlit Cloud](https://share.streamlit.io/deploy?repository=https://github.com/YOUR_GITHUB_USERNAME/solar_farm&mainScript=streamlit_app.py)
         """
-    )
-
-    st.subheader("Navigation")
-    selected_page = st.radio(
-        "Select a page",
-        options=[
-            "Input Landing Page",
-            "Key Metrics Dashboard",
-            "Financial Performance",
-            "Financial Position",
-            "Cash Flow Statement",
-            "Sensitivity Analyses",
-            "Scenario / IFs Analysis",
-            "Monte Carlo Simulation",
-            "Break-Even & Payback",
-        ],
-        index=0,
-        key="page_selector",
     )
 
 override_tuple = tuple(
