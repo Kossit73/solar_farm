@@ -104,6 +104,185 @@ def _downloadable_csv(df: pd.DataFrame) -> bytes:
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
 
 
+def _render_assumption_controls() -> tuple[bytes | None, Dict[str, float | bool]]:
+    """Render the primary assumption inputs and return override values."""
+
+    default_inputs: Dict[str, float | bool] = {
+        "input_discount_rate": 0.10,
+        "input_exit_multiple": 5.0,
+        "input_include_terminal": True,
+        "input_terminal_growth": 0.02,
+        "input_capacity_mw": 10.0,
+        "input_capacity_factor": 0.145,
+        "input_degradation_rate": 0.005,
+        "input_ppa_share": 0.90,
+        "input_ppa_rate": 160.0,
+        "input_ppa_escalation": 0.015,
+        "input_merchant_rate": 56.58,
+        "input_merchant_escalation": 0.015,
+        "input_rec_rate": 40.0,
+        "input_rec_escalation": 0.02,
+    }
+
+    for key, value in default_inputs.items():
+        st.session_state.setdefault(key, value)
+
+    st.subheader("Assumptions")
+
+    with st.container(border=True):
+        st.markdown("#### Upload assumption workbook")
+        uploaded_file = st.file_uploader(
+            "Drag and drop file here",
+            type=["xlsx", "xlsm", "xls"],
+            help="Optional Excel workbook matching the model template (max 200MB).",
+            key="uploaded_workbook",
+        )
+        st.caption("Limit 200MB per file · XLSX, XLSM, XLS")
+
+    with st.container(border=True):
+        st.markdown("#### Global")
+        global_cols = st.columns(4)
+        discount_rate = global_cols[0].number_input(
+            "Discount rate",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.01,
+            format="%.2f",
+            key="input_discount_rate",
+        )
+        exit_multiple = global_cols[1].number_input(
+            "Exit EBITDA multiple",
+            min_value=0.0,
+            step=0.5,
+            key="input_exit_multiple",
+        )
+        include_terminal = global_cols[2].checkbox(
+            "Include terminal value",
+            key="input_include_terminal",
+        )
+        terminal_growth = global_cols[3].number_input(
+            "Terminal growth rate",
+            min_value=0.0,
+            max_value=0.10,
+            step=0.005,
+            format="%.3f",
+            key="input_terminal_growth",
+        )
+
+    with st.container(border=True):
+        st.markdown("#### Energy")
+        energy_cols = st.columns((1, 1, 1))
+        capacity_mw = energy_cols[0].number_input(
+            "Capacity (MW)",
+            min_value=1.0,
+            step=0.5,
+            key="input_capacity_mw",
+        )
+        capacity_factor = energy_cols[1].slider(
+            "Capacity factor",
+            min_value=0.05,
+            max_value=0.35,
+            step=0.005,
+            key="input_capacity_factor",
+        )
+        degradation_rate = energy_cols[2].slider(
+            "Annual degradation",
+            min_value=0.0,
+            max_value=0.05,
+            step=0.001,
+            key="input_degradation_rate",
+        )
+
+    with st.container(border=True):
+        st.markdown("#### Revenue")
+        share_col, rates_col = st.columns((1, 2))
+        ppa_share = share_col.slider(
+            "Share of output sold via PPA",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            key="input_ppa_share",
+        )
+
+        with rates_col:
+            rate_cols = st.columns(3)
+            ppa_rate = rate_cols[0].number_input(
+                "Year 1 PPA rate ($/MWh)",
+                min_value=0.0,
+                step=5.0,
+                key="input_ppa_rate",
+            )
+            ppa_escalation = rate_cols[1].number_input(
+                "PPA annual escalation",
+                min_value=0.0,
+                max_value=0.10,
+                step=0.005,
+                format="%.3f",
+                key="input_ppa_escalation",
+            )
+            rec_rate = rate_cols[2].number_input(
+                "Year 1 REC price ($/MWh)",
+                min_value=0.0,
+                step=1.0,
+                key="input_rec_rate",
+            )
+
+        escalation_cols = st.columns(3)
+        merchant_rate = escalation_cols[0].number_input(
+            "Year 1 merchant rate ($/MWh)",
+            min_value=0.0,
+            step=2.0,
+            key="input_merchant_rate",
+        )
+        merchant_escalation = escalation_cols[1].number_input(
+            "Merchant annual escalation",
+            min_value=0.0,
+            max_value=0.10,
+            step=0.005,
+            format="%.3f",
+            key="input_merchant_escalation",
+        )
+        rec_escalation = escalation_cols[2].number_input(
+            "REC annual escalation",
+            min_value=0.0,
+            max_value=0.10,
+            step=0.005,
+            format="%.3f",
+            key="input_rec_escalation",
+        )
+
+    with st.container(border=True):
+        st.markdown("#### Deployment")
+        st.markdown(
+            """
+            Use the Streamlit Cloud deployer to launch this app directly from your GitHub repository.
+
+            [Deploy on Streamlit Cloud](https://share.streamlit.io/deploy?repository=https://github.com/YOUR_GITHUB_USERNAME/solar_farm&mainScript=streamlit_app.py)
+            """
+        )
+
+    excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
+
+    overrides: Dict[str, float | bool] = {
+        "discount_rate": float(discount_rate),
+        "exit_multiple": float(exit_multiple),
+        "include_terminal": bool(include_terminal),
+        "terminal_growth_rate": float(terminal_growth),
+        "capacity_mw": float(capacity_mw),
+        "capacity_factor": float(capacity_factor),
+        "degradation_rate": float(degradation_rate),
+        "ppa_share": float(ppa_share),
+        "ppa_rate": float(ppa_rate),
+        "ppa_escalation": float(ppa_escalation),
+        "merchant_rate": float(merchant_rate),
+        "merchant_escalation": float(merchant_escalation),
+        "rec_rate": float(rec_rate),
+        "rec_escalation": float(rec_escalation),
+    }
+
+    return excel_bytes, overrides
+
+
 def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> None:
     """Present the core assumptions used to drive the model."""
 
@@ -624,78 +803,20 @@ PAGE_OPTIONS = [
 
 tabs = st.tabs(PAGE_OPTIONS)
 
-with st.sidebar:
-    st.header("Assumptions")
-    uploaded_file = st.file_uploader(
-        "Upload assumption workbook", type=["xlsx", "xlsm", "xls"], help="Optional Excel file using the model template."
-    )
+with tabs[0]:
+    excel_bytes, override_dict = _render_assumption_controls()
 
-    st.subheader("Global")
-    discount_rate = st.number_input("Discount rate", min_value=0.0, max_value=1.0, value=0.10, step=0.01, format="%.2f")
-    exit_multiple = st.number_input("Exit EBITDA multiple", min_value=0.0, value=5.0, step=0.5)
-    include_terminal = st.checkbox("Include terminal value", value=True)
-    terminal_growth_rate = st.number_input(
-        "Terminal growth rate", min_value=0.0, max_value=0.10, value=0.02, step=0.005, format="%.3f"
-    )
-
-    st.subheader("Energy")
-    capacity_mw = st.number_input("Capacity (MW)", min_value=1.0, value=10.0, step=0.5)
-    capacity_factor = st.slider("Capacity factor", min_value=0.05, max_value=0.35, value=0.145, step=0.005)
-    degradation_rate = st.slider("Annual degradation", min_value=0.0, max_value=0.05, value=0.005, step=0.001)
-
-    st.subheader("Revenue")
-    ppa_share = st.slider("Share of output sold via PPA", min_value=0.0, max_value=1.0, value=0.90, step=0.05)
-    ppa_rate = st.number_input("Year 1 PPA rate ($/MWh)", min_value=0.0, value=160.0, step=5.0)
-    ppa_escalation = st.number_input("PPA annual escalation", min_value=0.0, max_value=0.10, value=0.015, step=0.005, format="%.3f")
-
-    merchant_rate = st.number_input("Year 1 merchant rate ($/MWh)", min_value=0.0, value=56.58, step=2.0)
-    merchant_escalation = st.number_input(
-        "Merchant annual escalation", min_value=0.0, max_value=0.10, value=0.015, step=0.005, format="%.3f"
-    )
-
-    rec_rate = st.number_input("Year 1 REC price ($/MWh)", min_value=0.0, value=40.0, step=1.0)
-    rec_escalation = st.number_input("REC annual escalation", min_value=0.0, max_value=0.10, value=0.02, step=0.005, format="%.3f")
-
-    st.divider()
-    st.markdown(
-        """
-        ### Deploy to Streamlit Cloud
-        Use the Streamlit Cloud deployer to launch this app directly from your GitHub repository.
-
-        [Deploy on Streamlit Cloud](https://share.streamlit.io/deploy?repository=https://github.com/YOUR_GITHUB_USERNAME/solar_farm&mainScript=streamlit_app.py)
-        """
-    )
-
-override_tuple = tuple(
-    sorted(
-        {
-            "discount_rate": float(discount_rate),
-            "exit_multiple": float(exit_multiple),
-            "include_terminal": bool(include_terminal),
-            "terminal_growth_rate": float(terminal_growth_rate),
-            "capacity_mw": float(capacity_mw),
-            "capacity_factor": float(capacity_factor),
-            "degradation_rate": float(degradation_rate),
-            "ppa_share": float(ppa_share),
-            "ppa_rate": float(ppa_rate),
-            "ppa_escalation": float(ppa_escalation),
-            "merchant_rate": float(merchant_rate),
-            "merchant_escalation": float(merchant_escalation),
-            "rec_rate": float(rec_rate),
-            "rec_escalation": float(rec_escalation),
-        }.items()
-    )
-)
-
-excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
+override_tuple = tuple(sorted(override_dict.items()))
 
 outputs, summary_tables, assumptions = _run_model(excel_bytes, override_tuple)
 
-for page_name, tab in zip(PAGE_OPTIONS, tabs):
+with tabs[0]:
+    st.divider()
+    _render_input_landing(assumptions, outputs)
+
+for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
     with tab:
-        if page_name == "Input Landing Page":
-            _render_input_landing(assumptions, outputs)
-        elif page_name == "Key Metrics Dashboard":
+        if page_name == "Key Metrics Dashboard":
             st.header("Overview")
             _render_overview(outputs, summary_tables)
             st.header("Revenue & Energy")
@@ -723,4 +844,6 @@ for page_name, tab in zip(PAGE_OPTIONS, tabs):
         else:
             _render_break_even(outputs)
 
-st.sidebar.success("Model run complete. Adjust the assumptions to refresh outputs.")
+with st.sidebar:
+    st.info("Use the Input Landing Page tab to upload workbooks and adjust assumptions.")
+    st.success("Model run complete. Adjust the inputs to refresh outputs.")
