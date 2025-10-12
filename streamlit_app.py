@@ -49,6 +49,7 @@ def _run_model(
     override_items: Tuple[Tuple[str, float | bool], ...],
     seasonality_rows: Tuple[Tuple[str, float], ...],
     labour_rows: Tuple[Tuple[object, ...], ...],
+    initial_investment_rows: Tuple[Tuple[object, ...], ...],
     cost_rows: Tuple[Tuple[object, ...], ...],
     receivable_rows: Tuple[Tuple[object, ...], ...],
     inventory_rows: Tuple[Tuple[object, ...], ...],
@@ -63,6 +64,22 @@ def _run_model(
     overrides = dict(override_items)
     seasonality_list = _rows_from_tuple(seasonality_rows, ("month", "share"))
     labour_list = _rows_from_tuple(labour_rows, ("role", "annual_cost"))
+    initial_investment_list = _rows_from_tuple(
+        initial_investment_rows,
+        (
+            "id",
+            "name",
+            "amount",
+            "depreciation_years",
+            "method",
+            "year",
+            "month",
+            "spend_profile",
+            "opening_balance",
+            "depreciation_rate",
+            "service_month",
+        ),
+    )
     cost_list = _rows_from_tuple(cost_rows, ("name", "fixed_cost", "variable_cost", "inflation_rate"))
     receivable_list = _rows_from_tuple(
         receivable_rows,
@@ -236,10 +253,17 @@ def _run_model(
         assumptions.global_assumptions.tax.income_tax_rate = tax_schedule[0].tax_rate
 
     capex_items = []
-    for row in fixed_asset_list:
-        item = _capex_item_from_row(row, start_year)
-        if item:
+    for row in initial_investment_list:
+        item = _capex_item_from_initial(row, start_year)
+        if item is not None:
             capex_items.append(item)
+
+    if not capex_items:
+        for row in fixed_asset_list:
+            item = _capex_item_from_row(row, start_year)
+            if item:
+                capex_items.append(item)
+
     if capex_items:
         assumptions.capex_items = capex_items
 
@@ -367,6 +391,47 @@ def _projection_timeline_index() -> pd.DatetimeIndex:
     return pd.date_range(start=start, periods=months, freq="MS")
 
 
+def _ensure_initial_investment_state() -> None:
+    """Initialize the initial investment session state if missing."""
+
+    if "initial_investment" not in st.session_state:
+        defaults = copy.deepcopy(INITIAL_INVESTMENT_DEFAULTS)
+        st.session_state["initial_investment"] = defaults
+        _sync_initial_investment_to_fixed_assets()
+
+
+def _parse_spend_profile(value: object) -> List[float]:
+    """Convert a UI value into a spend profile list."""
+
+    tokens: List[float] = []
+    if isinstance(value, str):
+        for part in value.replace("%", "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                number = float(part)
+                if number > 1.0:
+                    number = number / 100.0
+                tokens.append(number)
+            except ValueError:
+                continue
+    elif isinstance(value, (list, tuple, np.ndarray)):
+        for item in value:
+            try:
+                number = float(item)
+                if number > 1.0:
+                    number = number / 100.0
+                tokens.append(number)
+            except (TypeError, ValueError):
+                continue
+
+    tokens = [t for t in tokens if t > 0]
+    if not tokens:
+        return [1.0]
+    return tokens
+
+
 def _capex_item_from_row(row: Dict[str, object], start_year: int) -> CapexItem | None:
     """Build a CapexItem from UI row data."""
 
@@ -398,6 +463,120 @@ def _capex_item_from_row(row: Dict[str, object], start_year: int) -> CapexItem |
         depreciation_rate=depreciation_rate,
         service_month=service_month,
     )
+
+
+def _capex_item_from_initial(row: Dict[str, object], start_year: int) -> CapexItem | None:
+    """Convert an initial investment row into a CapexItem."""
+
+    amount = max(0.0, _coerce_float(row.get("amount")))
+    opening_balance = max(0.0, _coerce_float(row.get("opening_balance")))
+    if amount <= 0 and opening_balance <= 0:
+        return None
+
+    name = str(row.get("name", "Investment")).strip() or "Investment"
+    method_value = str(row.get("method", "Straight-Line")).strip() or "Straight-Line"
+    if method_value.lower() not in {"straight-line", "declining balance"}:
+        method_value = "Straight-Line"
+
+    depreciation_years = max(1, int(round(_coerce_float(row.get("depreciation_years", 1.0), 1.0))))
+    depreciation_rate = max(0.0, min(1.0, _coerce_float(row.get("depreciation_rate", 0.0))))
+
+    year_value = int(_coerce_float(row.get("year", start_year), start_year))
+    month_in_year = int(_coerce_float(row.get("month", 1), 1.0))
+    month_in_year = min(12, max(1, month_in_year))
+    if year_value < start_year:
+        year_value = start_year
+    service_month = int(_coerce_float(row.get("service_month", 1), 1.0))
+    if service_month <= 0:
+        service_month = (year_value - start_year) * 12 + month_in_year
+    target_month = max(1, service_month)
+
+    spend_profile_values = _parse_spend_profile(row.get("spend_profile"))
+    prefix_length = max(0, target_month - 1)
+    spend_profile = [0.0] * prefix_length + spend_profile_values
+
+    return CapexItem(
+        name=name,
+        amount=amount,
+        depreciation_years=depreciation_years,
+        spend_profile=spend_profile,
+        method=method_value,
+        opening_balance=opening_balance,
+        depreciation_rate=depreciation_rate,
+        service_month=max(1, service_month),
+    )
+
+
+def _sync_initial_investment_to_fixed_assets() -> None:
+    """Refresh the fixed asset schedule state from the initial investment inputs."""
+
+    if "initial_investment" not in st.session_state:
+        return
+
+    start_year, _ = _projection_year_bounds()
+    timeline = _projection_timeline_index()
+    fixed_rows: List[Dict[str, object]] = []
+    for row in st.session_state["initial_investment"]:
+        item = _capex_item_from_initial(row, start_year)
+        if item is None:
+            continue
+        _, depreciation_series, _, summary = capex_item_schedule(item, timeline)
+        service_month = summary.get("service_month", 1)
+        service_year = start_year + max(0, service_month - 1) // 12
+        fixed_rows.append(
+            {
+                "id": row.get("id"),
+                "asset_type": summary.get("asset_type", item.name),
+                "method": summary.get("method", item.method),
+                "year": service_year,
+                "acquisition": summary.get("acquisition", item.amount),
+                "asset_life": summary.get("depreciation_years", item.depreciation_years),
+                "net_book_value": summary.get("opening_balance", item.opening_balance),
+                "depreciation_rate": summary.get("depreciation_rate", item.depreciation_rate),
+                "total_asset_cost": summary.get("total_asset_cost", item.amount + item.opening_balance),
+                "total_depreciation": summary.get("total_depreciation", float(depreciation_series.sum())),
+                "cumulative_depreciation": summary.get("cumulative_depreciation", float(depreciation_series.sum())),
+                "ending_book_value": summary.get("ending_book_value", 0.0),
+                "spend_profile": row.get("spend_profile", "1.0"),
+                "service_month": service_month,
+                "opening_balance": summary.get("opening_balance", item.opening_balance),
+            }
+        )
+
+    st.session_state["fixed_assets_schedule"] = fixed_rows
+
+
+def _sync_fixed_assets_to_initial_investment(rows: List[Dict[str, object]]) -> None:
+    """Update the initial investment table based on the fixed asset schedule edits."""
+
+    start_year, _ = _projection_year_bounds()
+    updated_rows: List[Dict[str, object]] = []
+    for row in rows:
+        row_id = row.get("id") or str(uuid.uuid4())
+        service_month = int(_coerce_float(row.get("service_month", 1), 1.0))
+        if service_month <= 0:
+            year = int(_coerce_float(row.get("year", start_year), start_year))
+            service_month = (year - start_year) * 12 + 1
+        year_value = start_year + max(0, service_month - 1) // 12
+        month_value = ((max(0, service_month - 1)) % 12) + 1
+        updated_rows.append(
+            {
+                "id": row_id,
+                "name": str(row.get("asset_type", "Investment")),
+                "amount": _coerce_float(row.get("acquisition")),
+                "depreciation_years": max(1, int(round(_coerce_float(row.get("asset_life", 1.0), 1.0)))),
+                "method": str(row.get("method", "Straight-Line")),
+                "year": year_value,
+                "month": month_value,
+                "spend_profile": row.get("spend_profile", "1.0"),
+                "opening_balance": _coerce_float(row.get("opening_balance", row.get("net_book_value"))),
+                "depreciation_rate": _coerce_float(row.get("depreciation_rate", 0.0)),
+                "service_month": service_month,
+            }
+        )
+
+    st.session_state["initial_investment"] = updated_rows
+    _sync_initial_investment_to_fixed_assets()
 
 
 def _format_projection_caption(assumptions: Assumptions) -> str:
@@ -745,6 +924,114 @@ LABOUR_DEFAULTS = [
     {"role": "Field Technicians", "annual_cost": 180_000.0},
     {"role": "Control Room Operator", "annual_cost": 80_000.0},
     {"role": "Maintenance Crew", "annual_cost": 150_000.0},
+]
+
+
+INITIAL_INVESTMENT_DEFAULTS = [
+    {
+        "id": "capex_panels",
+        "name": "Solar Panels",
+        "amount": 5_800_000.0,
+        "depreciation_years": 20,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_mounting",
+        "name": "Mounting System",
+        "amount": 1_600_000.0,
+        "depreciation_years": 20,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_inverters",
+        "name": "Inverters",
+        "amount": 1_776_000.0,
+        "depreciation_years": 15,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_electrical",
+        "name": "Electrical & Wiring",
+        "amount": 1_800_000.0,
+        "depreciation_years": 20,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_land",
+        "name": "Land Acquisition",
+        "amount": 200_000.0,
+        "depreciation_years": 20,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_permitting",
+        "name": "Permitting & Compliance",
+        "amount": 100_000.0,
+        "depreciation_years": 10,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_labour",
+        "name": "Construction Labour",
+        "amount": 500_000.0,
+        "depreciation_years": 5,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
+    {
+        "id": "capex_contingency",
+        "name": "Contingency",
+        "amount": 1_177_608.0,
+        "depreciation_years": 5,
+        "method": "Straight-Line",
+        "year": 2025,
+        "month": 1,
+        "spend_profile": "0.5, 0.5",
+        "opening_balance": 0.0,
+        "depreciation_rate": 0.0,
+        "service_month": 1,
+    },
 ]
 
 
@@ -1215,6 +1502,166 @@ def _render_projection_horizon_section() -> Tuple[int, int]:
     return start_year, int(end_year)
 
 
+def _render_initial_investment_section() -> None:
+    _ensure_initial_investment_state()
+    state_key = "initial_investment"
+    st.markdown("### Initial Investment Input Table")
+
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    method_options = ["Straight-Line", "Declining Balance"]
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
+
+    month_options = list(range(1, 13))
+    month_labels = {
+        1: "Jan",
+        2: "Feb",
+        3: "Mar",
+        4: "Apr",
+        5: "May",
+        6: "Jun",
+        7: "Jul",
+        8: "Aug",
+        9: "Sep",
+        10: "Oct",
+        11: "Nov",
+        12: "Dec",
+    }
+
+    for idx, row in enumerate(rows):
+        row_id = row.get("id") or uuid.uuid4().hex
+        row["id"] = row_id
+        with st.container(border=True):
+            col_name, col_amount, col_life, col_method = st.columns([3, 2, 1.5, 1.5])
+            name = col_name.text_input(
+                "Investment Item",
+                value=str(row.get("name", "")),
+                key=f"{state_key}_name_{row_id}",
+            )
+            amount = col_amount.number_input(
+                "Amount",
+                value=float(row.get("amount", 0.0)),
+                key=f"{state_key}_amount_{row_id}",
+                min_value=0.0,
+                step=1000.0,
+                format="%.2f",
+            )
+            depreciation_years = col_life.number_input(
+                "Depreciation Years",
+                value=float(row.get("depreciation_years", 1.0)),
+                key=f"{state_key}_life_{row_id}",
+                min_value=1.0,
+                step=1.0,
+            )
+            method_value = str(row.get("method", method_options[0]))
+            if method_value not in method_options:
+                method_value = method_options[0]
+            method = col_method.selectbox(
+                "Method",
+                method_options,
+                index=method_options.index(method_value),
+                key=f"{state_key}_method_{row_id}",
+            )
+
+            col_year, col_month, col_service, col_remove = st.columns([1.5, 1.5, 1.5, 1])
+            current_year = int(row.get("year", year_options[0]))
+            if current_year not in year_options:
+                current_year = year_options[0]
+            year = col_year.selectbox(
+                "Service Year",
+                options=year_options,
+                index=year_options.index(current_year),
+                key=f"{state_key}_year_{row_id}",
+            )
+            current_month = int(row.get("month", 1))
+            if current_month not in month_options:
+                current_month = 1
+            month = col_month.selectbox(
+                "Service Month",
+                options=month_options,
+                index=month_options.index(current_month),
+                format_func=lambda m: month_labels.get(m, str(m)),
+                key=f"{state_key}_month_{row_id}",
+            )
+            service_month = col_service.number_input(
+                "Service Month #",
+                value=float(row.get("service_month", (year - start_year) * 12 + month)),
+                key=f"{state_key}_service_{row_id}",
+                min_value=1.0,
+                step=1.0,
+            )
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{row_id}")
+
+            col_profile, col_opening, col_rate = st.columns([3, 2, 1.5])
+            profile_value = str(row.get("spend_profile", "1.0"))
+            spend_profile = col_profile.text_input(
+                "Spend Profile",
+                value=profile_value,
+                key=f"{state_key}_profile_{row_id}",
+                help="Comma separated weights (e.g. 0.5, 0.5). Values above 1 are treated as percentages.",
+            )
+            opening_balance = col_opening.number_input(
+                "Opening Balance",
+                value=float(row.get("opening_balance", 0.0)),
+                key=f"{state_key}_opening_{row_id}",
+                min_value=0.0,
+                step=1000.0,
+                format="%.2f",
+            )
+            depreciation_rate_percent = col_rate.number_input(
+                "Depreciation Rate (%)",
+                value=float(row.get("depreciation_rate", 0.0)) * 100.0,
+                key=f"{state_key}_rate_{row_id}",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.2f",
+            )
+
+        if remove_clicked:
+            continue
+
+        updated_rows.append(
+            {
+                "id": row_id,
+                "name": name,
+                "amount": amount,
+                "depreciation_years": depreciation_years,
+                "method": method,
+                "year": year,
+                "month": month,
+                "spend_profile": spend_profile,
+                "opening_balance": opening_balance,
+                "depreciation_rate": depreciation_rate_percent / 100.0,
+                "service_month": service_month,
+            }
+        )
+
+    st.session_state[state_key] = updated_rows
+    _sync_initial_investment_to_fixed_assets()
+
+    if st.button("Add Investment Item", key=f"{state_key}_add"):
+        st.session_state[state_key].append(
+            {
+                "id": uuid.uuid4().hex,
+                "name": "New Investment",
+                "amount": 0.0,
+                "depreciation_years": 5.0,
+                "method": "Straight-Line",
+                "year": year_options[0],
+                "month": 1,
+                "spend_profile": "1.0",
+                "opening_balance": 0.0,
+                "depreciation_rate": 0.0,
+                "service_month": 1.0,
+            }
+        )
+        _sync_initial_investment_to_fixed_assets()
+
+
 def _render_labour_structure_section() -> None:
     state_key = "labour_structure"
     if state_key not in st.session_state:
@@ -1489,6 +1936,7 @@ def _render_inventory_payables_section() -> None:
 
 
 def _render_fixed_assets_section() -> None:
+    _ensure_initial_investment_state()
     state_key = "fixed_assets_schedule"
     if state_key not in st.session_state:
         st.session_state[state_key] = copy.deepcopy(FIXED_ASSET_DEFAULTS)
@@ -1646,10 +2094,12 @@ def _render_fixed_assets_section() -> None:
             }
         )
     st.session_state[state_key] = updated_rows
+    _sync_fixed_assets_to_initial_investment(updated_rows)
 
     if st.button("Add Fixed Asset", key=f"{state_key}_add"):
         st.session_state[state_key].append(
             {
+                "id": uuid.uuid4().hex,
                 "asset_type": "New Asset",
                 "method": method_options[0],
                 "year": year_options[0],
@@ -1661,8 +2111,12 @@ def _render_fixed_assets_section() -> None:
                 "total_depreciation": 0.0,
                 "cumulative_depreciation": 0.0,
                 "ending_book_value": 0.0,
+                "spend_profile": "1.0",
+                "service_month": 1,
+                "opening_balance": 0.0,
             }
         )
+        _sync_fixed_assets_to_initial_investment(st.session_state[state_key])
 
 
 def _render_loan_schedule_section() -> None:
@@ -2093,6 +2547,8 @@ def _render_assumption_controls() -> tuple[
     List[Dict[str, object]],
     List[Dict[str, object]],
     List[Dict[str, object]],
+    List[Dict[str, object]],
+    List[Dict[str, object]],
 ]:
     """Render the primary assumption inputs and return override values."""
 
@@ -2114,6 +2570,7 @@ def _render_assumption_controls() -> tuple[
     _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
     _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
     seasonality_rows = _render_seasonality_table()
+    _render_initial_investment_section()
     _render_labour_structure_section()
     _render_operating_expense_section()
     _render_accounts_receivable_section()
@@ -2161,6 +2618,8 @@ def _render_assumption_controls() -> tuple[
         "end_year": int(end_year),
     }
 
+    initial_investment_rows = copy.deepcopy(st.session_state.get("initial_investment", []))
+
     labour_rows = [
         {
             "role": str(row.get("role", "")).strip(),
@@ -2194,6 +2653,7 @@ def _render_assumption_controls() -> tuple[
         overrides,
         seasonality_rows,
         labour_rows,
+        initial_investment_rows,
         cost_rows,
         receivable_rows,
         inventory_rows,
@@ -3832,6 +4292,22 @@ with tabs[0]:
 
 seasonality_tuple = _tupleize(seasonality_rows, ("month", "share"))
 labour_tuple = _tupleize(labour_rows, ("role", "annual_cost"))
+initial_investment_tuple = _tupleize(
+    initial_investment_rows,
+    (
+        "id",
+        "name",
+        "amount",
+        "depreciation_years",
+        "method",
+        "year",
+        "month",
+        "spend_profile",
+        "opening_balance",
+        "depreciation_rate",
+        "service_month",
+    ),
+)
 cost_tuple = _tupleize(cost_rows, ("name", "fixed_cost", "variable_cost", "inflation_rate"))
 receivable_tuple = _tupleize(
     receivable_rows,
@@ -3872,6 +4348,7 @@ outputs, summary_tables, assumptions = _run_model(
     override_tuple,
     seasonality_tuple,
     labour_tuple,
+    initial_investment_tuple,
     cost_tuple,
     receivable_tuple,
     inventory_tuple,
