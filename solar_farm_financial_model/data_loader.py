@@ -6,7 +6,10 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
+try:  # pragma: no cover - optional dependency guard
+    import pandas as pd
+except ImportError:  # pragma: no cover - executed when pandas is unavailable
+    pd = None  # type: ignore[assignment]
 
 from .schemas import (
     Assumptions,
@@ -32,11 +35,18 @@ DEFAULT_EXCEL_PATH = Path("/mnt/data/Solar-Farmv2-vendor.xlsx")
 def load_assumptions(excel_path: Optional[Path] = None) -> Assumptions:
     """Load model assumptions from an Excel workbook or fall back to defaults."""
 
-    excel_path = excel_path or DEFAULT_EXCEL_PATH
-    if excel_path.exists():
-        loaded = _load_from_excel(excel_path)
-        if loaded is not None:
-            return loaded
+    target_path = excel_path if excel_path is not None else DEFAULT_EXCEL_PATH
+    if target_path.exists():
+        if pd is None:
+            if excel_path is not None:
+                raise RuntimeError(
+                    "pandas is required to load assumptions from Excel. "
+                    "Install pandas or provide a different data source."
+                )
+        else:
+            loaded = _load_from_excel(target_path)
+            if loaded is not None:
+                return loaded
     return _default_assumptions()
 
 
@@ -150,6 +160,12 @@ def _default_assumptions() -> Assumptions:
 
 def _load_from_excel(excel_path: Path) -> Optional[Assumptions]:
     """Attempt to hydrate assumptions from an Excel workbook."""
+
+    if pd is None:
+        raise RuntimeError(
+            "pandas is required to load assumptions from Excel. Install pandas to "
+            "use Excel-based assumptions."
+        )
 
     try:
         workbook = pd.ExcelFile(excel_path)

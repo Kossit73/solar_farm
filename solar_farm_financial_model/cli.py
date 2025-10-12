@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Optional
 
 from .data_loader import load_assumptions
-from .model import SolarFarmFinancialModel
-from .reporting import build_summary_report
 
 
 def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
@@ -30,7 +28,23 @@ def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
 
 def main(args: Optional[list[str]] = None) -> None:
     namespace = parse_args(args)
-    assumptions = load_assumptions(namespace.excel)
+    try:
+        assumptions = load_assumptions(namespace.excel)
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
+        raise SystemExit(1)
+
+    try:
+        from .model import SolarFarmFinancialModel
+        from .reporting import build_summary_report
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "a required dependency"
+        print(
+            "Error: Missing dependency "
+            f"{missing!r}. Install the packages listed in requirements.txt."
+        )
+        raise SystemExit(1)
+
     model = SolarFarmFinancialModel(assumptions)
     outputs = model.run()
 
