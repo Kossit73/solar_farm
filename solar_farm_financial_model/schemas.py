@@ -74,12 +74,16 @@ class RevenueAssumptions:
 
 @dataclass
 class CapexItem:
-    """A capital expenditure item with a deployment schedule."""
+    """A capital expenditure item with depreciation metadata."""
 
     name: str
     amount: float
     depreciation_years: int
     spend_profile: Sequence[float]
+    method: str = "Straight-Line"
+    opening_balance: float = 0.0
+    depreciation_rate: float = 0.0
+    service_month: int = 1
 
     def normalized_profile(self) -> List[float]:
         total = sum(self.spend_profile)

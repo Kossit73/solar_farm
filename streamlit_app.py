@@ -70,7 +70,19 @@ def _run_model(
     )
     fixed_asset_list = _rows_from_tuple(
         fixed_asset_rows,
-        ("asset_type", "method", "year", "acquisition", "asset_life"),
+        (
+            "asset_type",
+            "method",
+            "year",
+            "acquisition",
+            "asset_life",
+            "net_book_value",
+            "depreciation_rate",
+            "total_asset_cost",
+            "total_depreciation",
+            "cumulative_depreciation",
+            "ending_book_value",
+        ),
     )
     loan_list = _rows_from_tuple(loan_rows, ("name", "year", "duration_years", "amount", "interest_rate"))
     tax_list = _rows_from_tuple(tax_rows, ("name", "year", "tax_rate"))
@@ -223,20 +235,34 @@ def _run_model(
 
     capex_items = []
     for row in fixed_asset_list:
-        amount = _coerce_float(row.get("acquisition"))
-        if amount <= 0:
+        amount = max(0.0, _coerce_float(row.get("acquisition")))
+        opening_balance = max(0.0, _coerce_float(row.get("net_book_value")))
+        if amount <= 0 and opening_balance <= 0:
             continue
-        name = str(row.get("asset_type", "Asset")) or "Asset"
+
+        name = str(row.get("asset_type", "Asset")).strip() or "Asset"
+        method_value = str(row.get("method", "Straight-Line")).strip() or "Straight-Line"
+        if method_value.lower() not in {"straight-line", "declining balance"}:
+            method_value = "Straight-Line"
+
         asset_year = int(row.get("year", start_year))
         asset_life = max(1, int(round(_coerce_float(row.get("asset_life"), 1.0))))
+        depreciation_rate = max(0.0, min(1.0, _coerce_float(row.get("depreciation_rate"), 0.0)))
+
         months_offset = max(0, (asset_year - start_year) * 12)
         spend_profile = [0.0] * months_offset + [1.0]
+        service_month = months_offset + 1
+
         capex_items.append(
             CapexItem(
                 name=name,
                 amount=amount,
                 depreciation_years=asset_life,
                 spend_profile=spend_profile,
+                method=method_value,
+                opening_balance=opening_balance,
+                depreciation_rate=depreciation_rate,
+                service_month=service_month,
             )
         )
     if capex_items:
@@ -768,7 +794,7 @@ FIXED_ASSET_DEFAULTS = [
         "year": 2025,
         "acquisition": 1_000_000.0,
         "asset_life": 20.0,
-        "net_book_value": 1_000_000.0,
+        "net_book_value": 0.0,
         "depreciation_rate": 0.05,
         "total_asset_cost": 1_000_000.0,
         "total_depreciation": 0.0,
@@ -781,7 +807,7 @@ FIXED_ASSET_DEFAULTS = [
         "year": 2025,
         "acquisition": 2_500_000.0,
         "asset_life": 15.0,
-        "net_book_value": 2_500_000.0,
+        "net_book_value": 0.0,
         "depreciation_rate": 0.067,
         "total_asset_cost": 2_500_000.0,
         "total_depreciation": 0.0,
@@ -2430,7 +2456,8 @@ def _render_financial_position(outputs: ModelOutputs) -> None:
     """Display a simplified balance sheet view."""
 
     monthly = outputs.monthly_results
-    net_ppe = (monthly["capex"].cumsum() - monthly["depreciation"].cumsum()).clip(lower=0)
+    opening_ppe = monthly.get("ppe_opening_balance", pd.Series(0.0, index=monthly.index)).cumsum()
+    net_ppe = (opening_ppe + monthly["capex"].cumsum() - monthly["depreciation"].cumsum()).clip(lower=0)
     cash_balance = monthly["equity_cash_flow"].cumsum()
     debt_balance = monthly.get("debt_balance", pd.Series(0.0, index=monthly.index))
     accounts_receivable = monthly.get("accounts_receivable", pd.Series(0.0, index=monthly.index))
@@ -3773,7 +3800,19 @@ inventory_tuple = _tupleize(
 )
 fixed_asset_tuple = _tupleize(
     fixed_asset_rows,
-    ("asset_type", "method", "year", "acquisition", "asset_life"),
+    (
+        "asset_type",
+        "method",
+        "year",
+        "acquisition",
+        "asset_life",
+        "net_book_value",
+        "depreciation_rate",
+        "total_asset_cost",
+        "total_depreciation",
+        "cumulative_depreciation",
+        "ending_book_value",
+    ),
 )
 loan_tuple = _tupleize(loan_rows, ("name", "year", "duration_years", "amount", "interest_rate"))
 tax_tuple = _tupleize(tax_rows, ("name", "year", "tax_rate"))

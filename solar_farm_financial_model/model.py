@@ -38,7 +38,7 @@ class SolarFarmFinancialModel:
         revenue = self._compute_revenue(energy)
         fixed_opex = self._compute_fixed_opex()
         variable_opex = self._compute_variable_opex(energy)
-        capex, depreciation = self._compute_capex_and_depreciation()
+        capex, depreciation, opening_ppe = self._compute_capex_and_depreciation()
         debt_schedule = self._compute_debt_schedule()
         tax_rate_series = self._tax_rate_series()
 
@@ -49,6 +49,7 @@ class SolarFarmFinancialModel:
         monthly["total_opex"] = monthly.filter(like="opex_").sum(axis=1)
         monthly["capex"] = capex
         monthly["depreciation"] = depreciation
+        monthly["ppe_opening_balance"] = opening_ppe
         monthly = monthly.join(debt_schedule)
         monthly["revenue_total"] = monthly.filter(like="revenue_").sum(axis=1)
         monthly["ebitda"] = monthly["revenue_total"] - monthly["total_opex"]
@@ -177,20 +178,60 @@ class SolarFarmFinancialModel:
 
     # ------------------------------------------------------------------
     # Capex and depreciation
-    def _compute_capex_and_depreciation(self) -> Tuple[pd.Series, pd.Series]:
+    def _compute_capex_and_depreciation(self) -> Tuple[pd.Series, pd.Series, pd.Series]:
         capex = pd.Series(0.0, index=self._timeline)
         depreciation = pd.Series(0.0, index=self._timeline)
+        opening_balances = pd.Series(0.0, index=self._timeline)
+        total_months = len(self._timeline)
 
         for item in self.assumptions.capex_items:
             profile = item.normalized_profile()
             for offset, portion in enumerate(profile):
-                if offset < len(capex):
+                if offset < total_months and portion:
                     capex.iloc[offset] += item.amount * portion
-            depreciation_start = len(profile)
-            if item.depreciation_years > 0:
-                monthly_dep = item.amount / (item.depreciation_years * 12)
-                depreciation.iloc[depreciation_start:] += monthly_dep
-        return capex, depreciation
+
+            start_index = max(0, min(total_months - 1, getattr(item, "service_month", 1) - 1))
+            for idx, portion in enumerate(profile):
+                if portion > 0:
+                    start_index = max(start_index, idx)
+                    break
+            opening_balance = max(0.0, getattr(item, "opening_balance", 0.0))
+            if opening_balance > 0 and start_index < total_months:
+                opening_balances.iloc[start_index] += opening_balance
+
+            depreciation_basis = opening_balance + max(0.0, item.amount)
+            if depreciation_basis <= 0:
+                continue
+
+            method = getattr(item, "method", "Straight-Line").lower()
+            if method == "declining balance":
+                rate = max(0.0, min(1.0, getattr(item, "depreciation_rate", 0.0)))
+                if rate <= 0:
+                    method = "straight-line"
+                else:
+                    monthly_rate = 1 - (1 - rate) ** (1 / 12)
+                    book_value = depreciation_basis
+                    for idx in range(start_index, total_months):
+                        depreciation_value = book_value * monthly_rate
+                        if depreciation_value <= 0:
+                            break
+                        if depreciation_value > book_value:
+                            depreciation_value = book_value
+                        depreciation.iloc[idx] += depreciation_value
+                        book_value = max(0.0, book_value - depreciation_value)
+                        if book_value <= 1e-6:
+                            break
+                    continue
+
+            months_of_life = max(1, item.depreciation_years * 12)
+            monthly_dep = depreciation_basis / months_of_life
+            for n in range(months_of_life):
+                idx = start_index + n
+                if idx >= total_months:
+                    break
+                depreciation.iloc[idx] += monthly_dep
+
+        return capex, depreciation, opening_balances
 
     # ------------------------------------------------------------------
     # Debt schedule
