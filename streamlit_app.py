@@ -170,8 +170,9 @@ def _run_model(
     }
     if expense_names:
         fixed_items = [item for item in fixed_items if item.name not in expense_names]
-        variable_override_names = {f"{name} Variable" for name in expense_names}
-        variable_items = [item for item in variable_items if item.name not in variable_override_names]
+
+    if cost_list:
+        variable_items = []
 
     for row in cost_list:
         name = str(row.get("name", "")).strip()
@@ -183,14 +184,13 @@ def _run_model(
         fixed_items.append(
             FixedOpexItem(name=name, annual_cost=fixed_cost, inflation_rate=inflation_rate)
         )
-        if variable_cost > 0:
-            variable_items.append(
-                VariableOpexItem(
-                    name=f"{name} Variable",
-                    cost_per_mwh=variable_cost,
-                    escalation_rate=inflation_rate,
-                )
+        variable_items.append(
+            VariableOpexItem(
+                name=f"{name} Variable",
+                cost_per_mwh=variable_cost,
+                escalation_rate=inflation_rate,
             )
+        )
 
     for row in labour_list:
         role = str(row.get("role", "")).strip()
@@ -198,9 +198,8 @@ def _run_model(
         if role and cost > 0:
             fixed_items.append(FixedOpexItem(name=role, annual_cost=cost, inflation_rate=inflation_default))
 
-    if fixed_items:
-        assumptions.fixed_opex = tuple(fixed_items)
-    if variable_items:
+    assumptions.fixed_opex = tuple(fixed_items)
+    if cost_list:
         assumptions.variable_opex = tuple(variable_items)
 
     receivable_settings = [
