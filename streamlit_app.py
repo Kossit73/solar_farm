@@ -15,7 +15,11 @@ import pandas as pd
 import streamlit as st
 
 from solar_farm_financial_model.data_loader import load_assumptions
-from solar_farm_financial_model.model import ModelOutputs, SolarFarmFinancialModel
+from solar_farm_financial_model.model import (
+    ModelOutputs,
+    SolarFarmFinancialModel,
+    capex_item_schedule,
+)
 from solar_farm_financial_model.reporting import build_summary_report
 from solar_farm_financial_model.schemas import (
     Assumptions,
@@ -235,36 +239,9 @@ def _run_model(
 
     capex_items = []
     for row in fixed_asset_list:
-        amount = max(0.0, _coerce_float(row.get("acquisition")))
-        opening_balance = max(0.0, _coerce_float(row.get("net_book_value")))
-        if amount <= 0 and opening_balance <= 0:
-            continue
-
-        name = str(row.get("asset_type", "Asset")).strip() or "Asset"
-        method_value = str(row.get("method", "Straight-Line")).strip() or "Straight-Line"
-        if method_value.lower() not in {"straight-line", "declining balance"}:
-            method_value = "Straight-Line"
-
-        asset_year = int(row.get("year", start_year))
-        asset_life = max(1, int(round(_coerce_float(row.get("asset_life"), 1.0))))
-        depreciation_rate = max(0.0, min(1.0, _coerce_float(row.get("depreciation_rate"), 0.0)))
-
-        months_offset = max(0, (asset_year - start_year) * 12)
-        spend_profile = [0.0] * months_offset + [1.0]
-        service_month = months_offset + 1
-
-        capex_items.append(
-            CapexItem(
-                name=name,
-                amount=amount,
-                depreciation_years=asset_life,
-                spend_profile=spend_profile,
-                method=method_value,
-                opening_balance=opening_balance,
-                depreciation_rate=depreciation_rate,
-                service_month=service_month,
-            )
-        )
+        item = _capex_item_from_row(row, start_year)
+        if item:
+            capex_items.append(item)
     if capex_items:
         assumptions.capex_items = capex_items
 
@@ -381,6 +358,48 @@ def _projection_year_options() -> List[int]:
 
     start_year, end_year = _projection_year_bounds()
     return list(range(start_year, end_year + 1)) or [start_year]
+
+
+def _projection_timeline_index() -> pd.DatetimeIndex:
+    """Return a monthly timeline covering the configured projection horizon."""
+
+    start_year, end_year = _projection_year_bounds()
+    months = max(1, (end_year - start_year + 1) * 12)
+    start = pd.Timestamp(year=start_year, month=1, day=1)
+    return pd.date_range(start=start, periods=months, freq="MS")
+
+
+def _capex_item_from_row(row: Dict[str, object], start_year: int) -> CapexItem | None:
+    """Build a CapexItem from UI row data."""
+
+    amount = max(0.0, _coerce_float(row.get("acquisition")))
+    opening_balance = max(0.0, _coerce_float(row.get("net_book_value")))
+    if amount <= 0 and opening_balance <= 0:
+        return None
+
+    name = str(row.get("asset_type", "Asset")).strip() or "Asset"
+    method_value = str(row.get("method", "Straight-Line")).strip() or "Straight-Line"
+    if method_value.lower() not in {"straight-line", "declining balance"}:
+        method_value = "Straight-Line"
+
+    asset_year = int(row.get("year", start_year))
+    asset_life = max(1, int(round(_coerce_float(row.get("asset_life"), 1.0))))
+    depreciation_rate = max(0.0, min(1.0, _coerce_float(row.get("depreciation_rate", 0.0))))
+
+    months_offset = max(0, (asset_year - start_year) * 12)
+    spend_profile = [0.0] * months_offset + [1.0]
+    service_month = months_offset + 1
+
+    return CapexItem(
+        name=name,
+        amount=amount,
+        depreciation_years=asset_life,
+        spend_profile=spend_profile,
+        method=method_value,
+        opening_balance=opening_balance,
+        depreciation_rate=depreciation_rate,
+        service_month=service_month,
+    )
 
 
 def _format_projection_caption(assumptions: Assumptions) -> str:
@@ -1482,6 +1501,22 @@ def _render_fixed_assets_section() -> None:
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
+
+    timeline = _projection_timeline_index()
+    summaries: List[Dict[str, float]] = []
+    for row in rows:
+        item = _capex_item_from_row(row, start_year)
+        if item is not None:
+            _, _, _, summary = capex_item_schedule(item, timeline)
+        else:
+            summary = {
+                "total_asset_cost": _coerce_float(row.get("total_asset_cost")),
+                "total_depreciation": _coerce_float(row.get("total_depreciation")),
+                "cumulative_depreciation": _coerce_float(row.get("cumulative_depreciation")),
+                "ending_book_value": _coerce_float(row.get("ending_book_value")),
+            }
+        summaries.append(summary)
+
     for idx, row in enumerate(rows):
         with st.container(border=True):
             (
@@ -1554,33 +1589,43 @@ def _render_fixed_assets_section() -> None:
                 max_value=1.0,
                 step=0.001,
             )
+            summary_values = summaries[idx]
+            total_asset_cost_value = float(summary_values.get("total_asset_cost", acquisition + net_book_value))
+            total_depreciation_value = float(summary_values.get("total_depreciation", 0.0))
+            cumulative_depreciation_value = float(summary_values.get("cumulative_depreciation", total_depreciation_value))
+            ending_book_value_value = float(summary_values.get("ending_book_value", max(0.0, acquisition + net_book_value - total_depreciation_value)))
+
             total_asset_cost = col_total_cost.number_input(
                 "Total Asset Cost",
-                value=float(row.get("total_asset_cost", 0.0)),
+                value=total_asset_cost_value,
                 key=f"{state_key}_total_cost_{idx}",
                 min_value=0.0,
                 step=1000.0,
+                disabled=True,
             )
             total_depreciation = col_total_dep.number_input(
                 "Total Depreciation",
-                value=float(row.get("total_depreciation", 0.0)),
+                value=total_depreciation_value,
                 key=f"{state_key}_total_dep_{idx}",
                 min_value=0.0,
                 step=1000.0,
+                disabled=True,
             )
             cumulative_depreciation = col_cum_dep.number_input(
                 "Cumulative Depreciation",
-                value=float(row.get("cumulative_depreciation", 0.0)),
+                value=cumulative_depreciation_value,
                 key=f"{state_key}_cum_dep_{idx}",
                 min_value=0.0,
                 step=1000.0,
+                disabled=True,
             )
             ending_book_value = col_end_nbv.number_input(
                 "Ending Net Book Value",
-                value=float(row.get("ending_book_value", 0.0)),
+                value=ending_book_value_value,
                 key=f"{state_key}_ending_nbv_{idx}",
                 min_value=0.0,
                 step=1000.0,
+                disabled=True,
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
@@ -1594,10 +1639,10 @@ def _render_fixed_assets_section() -> None:
                 "asset_life": asset_life,
                 "net_book_value": net_book_value,
                 "depreciation_rate": depreciation_rate,
-                "total_asset_cost": total_asset_cost,
-                "total_depreciation": total_depreciation,
-                "cumulative_depreciation": cumulative_depreciation,
-                "ending_book_value": ending_book_value,
+                "total_asset_cost": total_asset_cost_value,
+                "total_depreciation": total_depreciation_value,
+                "cumulative_depreciation": cumulative_depreciation_value,
+                "ending_book_value": ending_book_value_value,
             }
         )
     st.session_state[state_key] = updated_rows
@@ -2344,6 +2389,15 @@ def _render_capital_and_debt(outputs: ModelOutputs) -> None:
         st.bar_chart(monthly[["capex"]], use_container_width=True)
     else:
         st.info("Capex profile not available.")
+
+    if not outputs.asset_summaries.empty:
+        st.markdown("#### Fixed asset summary")
+        display_df = outputs.asset_summaries.copy()
+        if "service_month" in display_df.columns:
+            display_df = display_df.rename(columns={"service_month": "Service Month"})
+        st.dataframe(display_df, use_container_width=True)
+    else:
+        st.info("No fixed asset items were configured.")
 
     debt_cols = [col for col in ["debt_draw", "debt_principal", "debt_interest", "debt_balance"] if col in monthly.columns]
     if debt_cols:

@@ -3,13 +3,96 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .metrics import irr, npv, payback_period
-from .schemas import Assumptions, DebtFacility, InventoryPayableSettings, ReceivableSettings
+from .schemas import Assumptions, CapexItem, DebtFacility, InventoryPayableSettings, ReceivableSettings
+
+
+def capex_item_schedule(
+    item: CapexItem, timeline: pd.DatetimeIndex
+) -> Tuple[pd.Series, pd.Series, pd.Series, Dict[str, float]]:
+    """Return monthly capex/depreciation schedules and summary for an item."""
+
+    total_months = len(timeline)
+    capex_series = pd.Series(0.0, index=timeline)
+    depreciation_series = pd.Series(0.0, index=timeline)
+    opening_series = pd.Series(0.0, index=timeline)
+
+    profile = item.normalized_profile()
+    for offset, portion in enumerate(profile):
+        if offset >= total_months:
+            break
+        if portion:
+            capex_series.iloc[offset] += item.amount * portion
+
+    start_index = max(0, min(total_months - 1, getattr(item, "service_month", 1) - 1))
+    for idx, portion in enumerate(profile):
+        if portion > 0:
+            start_index = max(start_index, idx)
+            break
+
+    opening_balance = max(0.0, getattr(item, "opening_balance", 0.0))
+    if opening_balance > 0 and start_index < total_months:
+        opening_series.iloc[start_index] += opening_balance
+
+    depreciation_basis = opening_balance + max(0.0, item.amount)
+    method = getattr(item, "method", "Straight-Line").lower()
+    recognized_months = 0
+    ending_balance = depreciation_basis
+
+    if depreciation_basis > 0:
+        if method == "declining balance":
+            rate = max(0.0, min(1.0, getattr(item, "depreciation_rate", 0.0)))
+            if rate > 0:
+                monthly_rate = 1 - (1 - rate) ** (1 / 12)
+                book_value = depreciation_basis
+                for idx in range(start_index, total_months):
+                    depreciation_value = book_value * monthly_rate
+                    if depreciation_value <= 0:
+                        break
+                    if depreciation_value > book_value:
+                        depreciation_value = book_value
+                    depreciation_series.iloc[idx] += depreciation_value
+                    book_value = max(0.0, book_value - depreciation_value)
+                    recognized_months += 1
+                    if book_value <= 1e-6:
+                        break
+                ending_balance = book_value
+            else:
+                method = "straight-line"
+
+        if method == "straight-line":
+            months_of_life = max(1, item.depreciation_years * 12)
+            monthly_dep = depreciation_basis / months_of_life
+            for n in range(months_of_life):
+                idx = start_index + n
+                if idx >= total_months:
+                    break
+                depreciation_series.iloc[idx] += monthly_dep
+                recognized_months += 1
+            ending_balance = max(0.0, depreciation_basis - monthly_dep * recognized_months)
+
+    total_depreciation = float(depreciation_series.sum())
+
+    summary = {
+        "asset_type": item.name,
+        "method": getattr(item, "method", "Straight-Line"),
+        "service_month": start_index + 1,
+        "acquisition": max(0.0, item.amount),
+        "opening_balance": opening_balance,
+        "total_asset_cost": opening_balance + max(0.0, item.amount),
+        "total_depreciation": total_depreciation,
+        "cumulative_depreciation": total_depreciation,
+        "ending_book_value": ending_balance,
+        "depreciation_years": item.depreciation_years,
+        "depreciation_rate": getattr(item, "depreciation_rate", 0.0),
+    }
+
+    return capex_series, depreciation_series, opening_series, summary
 
 
 @dataclass
@@ -19,6 +102,7 @@ class ModelOutputs:
     monthly_results: pd.DataFrame
     annual_summary: pd.DataFrame
     metrics: Dict[str, float]
+    asset_summaries: pd.DataFrame
 
 
 class SolarFarmFinancialModel:
@@ -38,7 +122,7 @@ class SolarFarmFinancialModel:
         revenue = self._compute_revenue(energy)
         fixed_opex = self._compute_fixed_opex()
         variable_opex = self._compute_variable_opex(energy)
-        capex, depreciation, opening_ppe = self._compute_capex_and_depreciation()
+        capex, depreciation, opening_ppe, asset_summaries = self._compute_capex_and_depreciation()
         debt_schedule = self._compute_debt_schedule()
         tax_rate_series = self._tax_rate_series()
 
@@ -92,7 +176,12 @@ class SolarFarmFinancialModel:
         metrics = self._compute_metrics(monthly)
         annual_summary = self._build_annual_summary(monthly)
 
-        return ModelOutputs(monthly_results=monthly, annual_summary=annual_summary, metrics=metrics)
+        return ModelOutputs(
+            monthly_results=monthly,
+            annual_summary=annual_summary,
+            metrics=metrics,
+            asset_summaries=asset_summaries,
+        )
 
     # ------------------------------------------------------------------
     # Timeline helpers
@@ -178,60 +267,23 @@ class SolarFarmFinancialModel:
 
     # ------------------------------------------------------------------
     # Capex and depreciation
-    def _compute_capex_and_depreciation(self) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    def _compute_capex_and_depreciation(
+        self,
+    ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.DataFrame]:
         capex = pd.Series(0.0, index=self._timeline)
         depreciation = pd.Series(0.0, index=self._timeline)
         opening_balances = pd.Series(0.0, index=self._timeline)
-        total_months = len(self._timeline)
+        asset_summaries: List[Dict[str, float]] = []
 
         for item in self.assumptions.capex_items:
-            profile = item.normalized_profile()
-            for offset, portion in enumerate(profile):
-                if offset < total_months and portion:
-                    capex.iloc[offset] += item.amount * portion
+            item_capex, item_dep, item_opening, summary = capex_item_schedule(item, self._timeline)
+            capex += item_capex
+            depreciation += item_dep
+            opening_balances += item_opening
+            asset_summaries.append(summary)
 
-            start_index = max(0, min(total_months - 1, getattr(item, "service_month", 1) - 1))
-            for idx, portion in enumerate(profile):
-                if portion > 0:
-                    start_index = max(start_index, idx)
-                    break
-            opening_balance = max(0.0, getattr(item, "opening_balance", 0.0))
-            if opening_balance > 0 and start_index < total_months:
-                opening_balances.iloc[start_index] += opening_balance
-
-            depreciation_basis = opening_balance + max(0.0, item.amount)
-            if depreciation_basis <= 0:
-                continue
-
-            method = getattr(item, "method", "Straight-Line").lower()
-            if method == "declining balance":
-                rate = max(0.0, min(1.0, getattr(item, "depreciation_rate", 0.0)))
-                if rate <= 0:
-                    method = "straight-line"
-                else:
-                    monthly_rate = 1 - (1 - rate) ** (1 / 12)
-                    book_value = depreciation_basis
-                    for idx in range(start_index, total_months):
-                        depreciation_value = book_value * monthly_rate
-                        if depreciation_value <= 0:
-                            break
-                        if depreciation_value > book_value:
-                            depreciation_value = book_value
-                        depreciation.iloc[idx] += depreciation_value
-                        book_value = max(0.0, book_value - depreciation_value)
-                        if book_value <= 1e-6:
-                            break
-                    continue
-
-            months_of_life = max(1, item.depreciation_years * 12)
-            monthly_dep = depreciation_basis / months_of_life
-            for n in range(months_of_life):
-                idx = start_index + n
-                if idx >= total_months:
-                    break
-                depreciation.iloc[idx] += monthly_dep
-
-        return capex, depreciation, opening_balances
+        asset_summary_df = pd.DataFrame(asset_summaries)
+        return capex, depreciation, opening_balances, asset_summary_df
 
     # ------------------------------------------------------------------
     # Debt schedule
