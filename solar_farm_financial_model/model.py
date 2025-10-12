@@ -120,7 +120,7 @@ class SolarFarmFinancialModel:
 
         energy = self._compute_energy_profile()
         revenue = self._compute_revenue(energy)
-        fixed_opex = self._compute_fixed_opex()
+        fixed_opex = self._compute_fixed_opex(energy)
         variable_opex = self._compute_variable_opex(energy)
         capex, depreciation, opening_ppe, asset_summaries = self._compute_capex_and_depreciation()
         debt_schedule = self._compute_debt_schedule()
@@ -243,15 +243,26 @@ class SolarFarmFinancialModel:
 
     # ------------------------------------------------------------------
     # Operating expenditure
-    def _compute_fixed_opex(self) -> pd.DataFrame:
+    def _compute_fixed_opex(self, energy: pd.Series) -> pd.DataFrame:
         years = self._year_index()
         fixed = pd.DataFrame(index=self._timeline)
+        energy_array = energy.reindex(self._timeline).fillna(0.0).to_numpy()
 
         for item in self.assumptions.fixed_opex:
-            annual_cost = item.annual_cost * (1 + item.inflation_rate) ** years
-            monthly_cost = annual_cost / 12.0
-            mask = np.arange(len(self._timeline)) + 1 >= item.start_month
+            inflation_factor = (1 + item.inflation_rate) ** years
+            monthly_cost = np.zeros_like(energy_array, dtype=float)
+
+            if getattr(item, "annual_cost", 0.0):
+                annual_cost = item.annual_cost * inflation_factor
+                monthly_cost += annual_cost / 12.0
+
+            if getattr(item, "cost_per_mwh", 0.0):
+                per_mwh_rate = item.cost_per_mwh * inflation_factor
+                monthly_cost += energy_array * per_mwh_rate
+
+            mask = np.arange(len(self._timeline)) + 1 >= getattr(item, "start_month", 1)
             fixed[f"opex_fixed_{item.name.lower().replace(' ', '_')}"] = monthly_cost * mask
+
         return fixed
 
     def _compute_variable_opex(self, energy: pd.Series) -> pd.DataFrame:

@@ -176,7 +176,12 @@ def _run_model(
         variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
         inflation_rate = max(0.0, _coerce_float(row.get("inflation_rate"), inflation_default))
         fixed_items.append(
-            FixedOpexItem(name=name, annual_cost=fixed_cost, inflation_rate=inflation_rate)
+            FixedOpexItem(
+                name=name,
+                annual_cost=0.0,
+                inflation_rate=inflation_rate,
+                cost_per_mwh=fixed_cost,
+            )
         )
         variable_items.append(
             VariableOpexItem(
@@ -616,6 +621,8 @@ def _apply_sensitivity_capex(assumptions: Assumptions, multiplier: float) -> Non
 def _apply_sensitivity_fixed_opex(assumptions: Assumptions, multiplier: float) -> None:
     for item in assumptions.fixed_opex:
         item.annual_cost = max(0.0, item.annual_cost * multiplier)
+        if hasattr(item, "cost_per_mwh"):
+            item.cost_per_mwh = max(0.0, item.cost_per_mwh * multiplier)
 
 
 def _apply_sensitivity_variable_opex(assumptions: Assumptions, multiplier: float) -> None:
@@ -745,42 +752,42 @@ OPERATING_EXPENSE_DEFAULTS = [
     {
         "id": "insurance",
         "name": "Insurance",
-        "fixed_cost": 20_000.0,
+        "fixed_cost": 1.575,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "om_contract",
         "name": "O&M Service Contract",
-        "fixed_cost": 6_000.0,
+        "fixed_cost": 0.472,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "vegetation",
         "name": "Vegetation Management",
-        "fixed_cost": 10_000.0,
+        "fixed_cost": 0.787,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "g_and_a",
         "name": "General & Administrative",
-        "fixed_cost": 100_000.0,
+        "fixed_cost": 7.873,
         "variable_cost": 0.0,
         "inflation_rate": 0.03,
     },
     {
         "id": "sales_marketing",
         "name": "Sales & Marketing",
-        "fixed_cost": 8_500.0,
+        "fixed_cost": 0.669,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "research_development",
         "name": "Research & Development",
-        "fixed_cost": 7_650.0,
+        "fixed_cost": 0.602,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
@@ -1260,15 +1267,15 @@ def _render_operating_expense_section() -> None:
                 key=f"{state_key}_name_{row_id}",
             )
             fixed_cost = col_fixed.number_input(
-                "Fixed Cost",
+                "Fixed Cost per MWh",
                 value=float(row.get("fixed_cost", 0.0)),
                 key=f"{state_key}_fixed_{row_id}",
                 min_value=0.0,
-                step=100.0,
-                format="%.2f",
+                step=0.01,
+                format="%.4f",
             )
             variable_cost = col_variable.number_input(
-                "Variable Cost",
+                "Variable Cost per MWh",
                 value=float(row.get("variable_cost", 0.0)),
                 key=f"{state_key}_variable_{row_id}",
                 min_value=0.0,
@@ -3155,6 +3162,8 @@ def _build_scenario_dataframe(
                 if not math.isclose(opex_multiplier, 1.0, rel_tol=1e-9):
                     for item in assumptions.fixed_opex:
                         item.annual_cost = max(0.0, item.annual_cost * opex_multiplier)
+                        if hasattr(item, "cost_per_mwh"):
+                            item.cost_per_mwh = max(0.0, item.cost_per_mwh * opex_multiplier)
                     for item in assumptions.variable_opex:
                         item.cost_per_mwh = max(0.0, item.cost_per_mwh * opex_multiplier)
 

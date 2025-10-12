@@ -94,12 +94,13 @@ class CapexItem:
 
 @dataclass
 class FixedOpexItem:
-    """Fixed annual operating cost with inflation."""
+    """Fixed operating cost with optional annual and per-MWh components."""
 
     name: str
-    annual_cost: float
-    inflation_rate: float
+    annual_cost: float = 0.0
+    inflation_rate: float = 0.0
     start_month: int = 1
+    cost_per_mwh: float = 0.0
 
 
 @dataclass
