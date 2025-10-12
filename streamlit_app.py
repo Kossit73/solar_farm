@@ -546,39 +546,6 @@ def _sync_initial_investment_to_fixed_assets() -> None:
     st.session_state["fixed_assets_schedule"] = fixed_rows
 
 
-def _sync_fixed_assets_to_initial_investment(rows: List[Dict[str, object]]) -> None:
-    """Update the initial investment table based on the fixed asset schedule edits."""
-
-    start_year, _ = _projection_year_bounds()
-    updated_rows: List[Dict[str, object]] = []
-    for row in rows:
-        row_id = row.get("id") or str(uuid.uuid4())
-        service_month = int(_coerce_float(row.get("service_month", 1), 1.0))
-        if service_month <= 0:
-            year = int(_coerce_float(row.get("year", start_year), start_year))
-            service_month = (year - start_year) * 12 + 1
-        year_value = start_year + max(0, service_month - 1) // 12
-        month_value = ((max(0, service_month - 1)) % 12) + 1
-        updated_rows.append(
-            {
-                "id": row_id,
-                "name": str(row.get("asset_type", "Investment")),
-                "amount": _coerce_float(row.get("acquisition")),
-                "depreciation_years": max(1, int(round(_coerce_float(row.get("asset_life", 1.0), 1.0)))),
-                "method": str(row.get("method", "Straight-Line")),
-                "year": year_value,
-                "month": month_value,
-                "spend_profile": row.get("spend_profile", "1.0"),
-                "opening_balance": _coerce_float(row.get("opening_balance", row.get("net_book_value"))),
-                "depreciation_rate": _coerce_float(row.get("depreciation_rate", 0.0)),
-                "service_month": service_month,
-            }
-        )
-
-    st.session_state["initial_investment"] = updated_rows
-    _sync_initial_investment_to_fixed_assets()
-
-
 def _format_projection_caption(assumptions: Assumptions) -> str:
     """Return a human-readable summary of the configured projection horizon."""
 
@@ -1090,36 +1057,6 @@ ACCOUNTS_RECEIVABLE_DEFAULTS = [
 INVENTORY_PAYABLE_DEFAULTS = [
     {"year": 2025, "days_in_year": 365, "inventory_days": 50, "accounts_payable_days": 45},
     {"year": 2026, "days_in_year": 365, "inventory_days": 50, "accounts_payable_days": 45},
-]
-
-
-FIXED_ASSET_DEFAULTS = [
-    {
-        "asset_type": "Land",
-        "method": "Straight-Line",
-        "year": 2025,
-        "acquisition": 1_000_000.0,
-        "asset_life": 20.0,
-        "net_book_value": 0.0,
-        "depreciation_rate": 0.05,
-        "total_asset_cost": 1_000_000.0,
-        "total_depreciation": 0.0,
-        "cumulative_depreciation": 0.0,
-        "ending_book_value": 1_000_000.0,
-    },
-    {
-        "asset_type": "GMP Facility",
-        "method": "Straight-Line",
-        "year": 2025,
-        "acquisition": 2_500_000.0,
-        "asset_life": 15.0,
-        "net_book_value": 0.0,
-        "depreciation_rate": 0.067,
-        "total_asset_cost": 2_500_000.0,
-        "total_depreciation": 0.0,
-        "cumulative_depreciation": 0.0,
-        "ending_book_value": 2_500_000.0,
-    },
 ]
 
 
@@ -1643,6 +1580,11 @@ def _render_initial_investment_section() -> None:
     st.session_state[state_key] = updated_rows
     _sync_initial_investment_to_fixed_assets()
 
+    st.caption(
+        "Depreciation schedules are generated automatically from these entries; "
+        "a separate fixed asset editor is no longer required."
+    )
+
     if st.button("Add Investment Item", key=f"{state_key}_add"):
         st.session_state[state_key].append(
             {
@@ -1933,190 +1875,6 @@ def _render_inventory_payables_section() -> None:
                 "accounts_payable_days": 45,
             }
         )
-
-
-def _render_fixed_assets_section() -> None:
-    _ensure_initial_investment_state()
-    state_key = "fixed_assets_schedule"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(FIXED_ASSET_DEFAULTS)
-
-    st.markdown("### Fixed Assets Schedule")
-    rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
-    method_options = ["Straight-Line", "Declining Balance"]
-    start_year, _ = _projection_year_bounds()
-    year_options = _projection_year_options()
-    if not year_options:
-        year_options = [start_year]
-
-    timeline = _projection_timeline_index()
-    summaries: List[Dict[str, float]] = []
-    for row in rows:
-        item = _capex_item_from_row(row, start_year)
-        if item is not None:
-            _, _, _, summary = capex_item_schedule(item, timeline)
-        else:
-            summary = {
-                "total_asset_cost": _coerce_float(row.get("total_asset_cost")),
-                "total_depreciation": _coerce_float(row.get("total_depreciation")),
-                "cumulative_depreciation": _coerce_float(row.get("cumulative_depreciation")),
-                "ending_book_value": _coerce_float(row.get("ending_book_value")),
-            }
-        summaries.append(summary)
-
-    for idx, row in enumerate(rows):
-        with st.container(border=True):
-            (
-                col_asset,
-                col_method,
-                col_year,
-                col_acq,
-                col_life,
-                col_nbv,
-                col_rate,
-                col_total_cost,
-                col_total_dep,
-                col_cum_dep,
-                col_end_nbv,
-                col_remove,
-            ) = st.columns([2.2, 1.5, 1, 1.5, 1, 1.5, 1, 1.5, 1.5, 1.5, 1.5, 0.8])
-
-            asset_type = col_asset.text_input(
-                "Asset Type",
-                value=str(row.get("asset_type", "")),
-                key=f"{state_key}_asset_{idx}",
-            )
-
-            method = str(row.get("method", method_options[0]))
-            if method not in method_options:
-                method = method_options[0]
-            method_value = col_method.selectbox(
-                "Method",
-                method_options,
-                index=method_options.index(method),
-                key=f"{state_key}_method_{idx}",
-            )
-
-            current_year = int(row.get("year", year_options[0]))
-            if current_year not in year_options:
-                current_year = year_options[0]
-            year = col_year.selectbox(
-                "Year",
-                options=year_options,
-                index=year_options.index(current_year),
-                key=f"{state_key}_year_{idx}",
-            )
-
-            acquisition = col_acq.number_input(
-                "Acquisition",
-                value=float(row.get("acquisition", 0.0)),
-                key=f"{state_key}_acq_{idx}",
-                min_value=0.0,
-                step=1000.0,
-            )
-            asset_life = col_life.number_input(
-                "Asset Life",
-                value=float(row.get("asset_life", 1.0)),
-                key=f"{state_key}_life_{idx}",
-                min_value=1.0,
-                step=1.0,
-            )
-            net_book_value = col_nbv.number_input(
-                "Opening Net Book Value",
-                value=float(row.get("net_book_value", 0.0)),
-                key=f"{state_key}_nbv_{idx}",
-                min_value=0.0,
-                step=1000.0,
-            )
-            depreciation_rate = col_rate.number_input(
-                "Depreciation Rate",
-                value=float(row.get("depreciation_rate", 0.0)),
-                key=f"{state_key}_rate_{idx}",
-                min_value=0.0,
-                max_value=1.0,
-                step=0.001,
-            )
-            summary_values = summaries[idx]
-            total_asset_cost_value = float(summary_values.get("total_asset_cost", acquisition + net_book_value))
-            total_depreciation_value = float(summary_values.get("total_depreciation", 0.0))
-            cumulative_depreciation_value = float(summary_values.get("cumulative_depreciation", total_depreciation_value))
-            ending_book_value_value = float(summary_values.get("ending_book_value", max(0.0, acquisition + net_book_value - total_depreciation_value)))
-
-            total_asset_cost = col_total_cost.number_input(
-                "Total Asset Cost",
-                value=total_asset_cost_value,
-                key=f"{state_key}_total_cost_{idx}",
-                min_value=0.0,
-                step=1000.0,
-                disabled=True,
-            )
-            total_depreciation = col_total_dep.number_input(
-                "Total Depreciation",
-                value=total_depreciation_value,
-                key=f"{state_key}_total_dep_{idx}",
-                min_value=0.0,
-                step=1000.0,
-                disabled=True,
-            )
-            cumulative_depreciation = col_cum_dep.number_input(
-                "Cumulative Depreciation",
-                value=cumulative_depreciation_value,
-                key=f"{state_key}_cum_dep_{idx}",
-                min_value=0.0,
-                step=1000.0,
-                disabled=True,
-            )
-            ending_book_value = col_end_nbv.number_input(
-                "Ending Net Book Value",
-                value=ending_book_value_value,
-                key=f"{state_key}_ending_nbv_{idx}",
-                min_value=0.0,
-                step=1000.0,
-                disabled=True,
-            )
-            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
-        if remove_clicked:
-            continue
-        updated_rows.append(
-            {
-                "asset_type": asset_type,
-                "method": method_value,
-                "year": year,
-                "acquisition": acquisition,
-                "asset_life": asset_life,
-                "net_book_value": net_book_value,
-                "depreciation_rate": depreciation_rate,
-                "total_asset_cost": total_asset_cost_value,
-                "total_depreciation": total_depreciation_value,
-                "cumulative_depreciation": cumulative_depreciation_value,
-                "ending_book_value": ending_book_value_value,
-            }
-        )
-    st.session_state[state_key] = updated_rows
-    _sync_fixed_assets_to_initial_investment(updated_rows)
-
-    if st.button("Add Fixed Asset", key=f"{state_key}_add"):
-        st.session_state[state_key].append(
-            {
-                "id": uuid.uuid4().hex,
-                "asset_type": "New Asset",
-                "method": method_options[0],
-                "year": year_options[0],
-                "acquisition": 0.0,
-                "asset_life": 1.0,
-                "net_book_value": 0.0,
-                "depreciation_rate": 0.0,
-                "total_asset_cost": 0.0,
-                "total_depreciation": 0.0,
-                "cumulative_depreciation": 0.0,
-                "ending_book_value": 0.0,
-                "spend_profile": "1.0",
-                "service_month": 1,
-                "opening_balance": 0.0,
-            }
-        )
-        _sync_fixed_assets_to_initial_investment(st.session_state[state_key])
 
 
 def _render_loan_schedule_section() -> None:
@@ -2575,7 +2333,6 @@ def _render_assumption_controls() -> tuple[
     _render_operating_expense_section()
     _render_accounts_receivable_section()
     _render_inventory_payables_section()
-    _render_fixed_assets_section()
     _render_loan_schedule_section()
     _render_tax_schedule_section()
     _render_inflation_schedule_section()
