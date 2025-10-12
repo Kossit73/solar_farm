@@ -4280,6 +4280,7 @@ with tabs[0]:
         override_dict,
         seasonality_rows,
         labour_rows,
+        initial_investment_rows,
         cost_rows,
         receivable_rows,
         inventory_rows,
