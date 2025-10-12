@@ -329,33 +329,45 @@ def _build_opex_items(
         fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
         variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
 
+        norm_name = name.lower()
+
         if fixed_cost > 0:
-            entry = fixed_map.setdefault(name, {"cost": 0.0, "inflation": inflation_rate})
+            entry = fixed_map.setdefault(
+                norm_name,
+                {"label": name, "cost": 0.0, "inflation": inflation_rate},
+            )
+            if not entry.get("label"):
+                entry["label"] = name
             entry["cost"] += fixed_cost
             entry["inflation"] = inflation_rate
 
         if variable_cost > 0:
-            entry = variable_map.setdefault(name, {"cost": 0.0, "inflation": inflation_rate})
+            entry = variable_map.setdefault(
+                norm_name,
+                {"label": name, "cost": 0.0, "inflation": inflation_rate},
+            )
+            if not entry.get("label"):
+                entry["label"] = name
             entry["cost"] += variable_cost
             entry["inflation"] = inflation_rate
 
     fixed_items = [
         FixedOpexItem(
-            name=name,
+            name=data["label"],
             annual_cost=0.0,
             inflation_rate=data["inflation"],
             cost_per_mwh=data["cost"],
         )
-        for name, data in sorted(fixed_map.items())
+        for data in sorted(fixed_map.values(), key=lambda entry: entry["label"].lower())
     ]
 
     variable_items = [
         VariableOpexItem(
-            name=f"{name} Variable",
+            name=f"{data['label']} Variable",
             cost_per_mwh=data["cost"],
             escalation_rate=data["inflation"],
         )
-        for name, data in sorted(variable_map.items())
+        for data in sorted(variable_map.values(), key=lambda entry: entry["label"].lower())
     ]
 
     return fixed_items, variable_items
