@@ -160,19 +160,13 @@ def _run_model(
     ]
     inflation_default = float(np.mean(inflation_rates)) if inflation_rates else 0.02
 
-    fixed_items = list(assumptions.fixed_opex)
-    variable_items = list(assumptions.variable_opex)
-
-    expense_names = {
-        str(row.get("name", "")).strip()
-        for row in cost_list
-        if str(row.get("name", "")).strip()
-    }
-    if expense_names:
-        fixed_items = [item for item in fixed_items if item.name not in expense_names]
-
-    if cost_list:
+    has_cost_inputs = bool(cost_list)
+    if has_cost_inputs:
+        fixed_items = []
         variable_items = []
+    else:
+        fixed_items = list(assumptions.fixed_opex)
+        variable_items = list(assumptions.variable_opex)
 
     for row in cost_list:
         name = str(row.get("name", "")).strip()
@@ -199,7 +193,7 @@ def _run_model(
             fixed_items.append(FixedOpexItem(name=role, annual_cost=cost, inflation_rate=inflation_default))
 
     assumptions.fixed_opex = tuple(fixed_items)
-    if cost_list:
+    if has_cost_inputs:
         assumptions.variable_opex = tuple(variable_items)
 
     receivable_settings = [
