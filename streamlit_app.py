@@ -177,36 +177,11 @@ def _run_model(
     ]
     inflation_default = float(np.mean(inflation_rates)) if inflation_rates else 0.02
 
-    has_cost_inputs = bool(cost_list)
-    if has_cost_inputs:
-        fixed_items = []
-        variable_items = []
+    if cost_list:
+        fixed_items, variable_items = _build_opex_items(cost_list, inflation_default)
     else:
         fixed_items = list(assumptions.fixed_opex)
         variable_items = list(assumptions.variable_opex)
-
-    for row in cost_list:
-        name = str(row.get("name", "")).strip()
-        if not name:
-            continue
-        fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
-        variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
-        inflation_rate = max(0.0, _coerce_float(row.get("inflation_rate"), inflation_default))
-        fixed_items.append(
-            FixedOpexItem(
-                name=name,
-                annual_cost=0.0,
-                inflation_rate=inflation_rate,
-                cost_per_mwh=fixed_cost,
-            )
-        )
-        variable_items.append(
-            VariableOpexItem(
-                name=f"{name} Variable",
-                cost_per_mwh=variable_cost,
-                escalation_rate=inflation_rate,
-            )
-        )
 
     for row in labour_list:
         role = str(row.get("role", "")).strip()
@@ -215,8 +190,7 @@ def _run_model(
             fixed_items.append(FixedOpexItem(name=role, annual_cost=cost, inflation_rate=inflation_default))
 
     assumptions.fixed_opex = tuple(fixed_items)
-    if has_cost_inputs:
-        assumptions.variable_opex = tuple(variable_items)
+    assumptions.variable_opex = tuple(variable_items)
 
     receivable_settings = [
         ReceivableSettings(
@@ -265,7 +239,8 @@ def _run_model(
                 capex_items.append(item)
 
     if capex_items:
-        assumptions.capex_items = capex_items
+        capex_items.sort(key=lambda item: (item.service_month, item.name.lower()))
+        assumptions.capex_items = tuple(capex_items)
 
     debt_facilities: List[DebtFacility] = []
     for row in loan_list:
@@ -287,7 +262,8 @@ def _run_model(
             )
         )
     if debt_facilities:
-        assumptions.debt_facilities = debt_facilities
+        debt_facilities.sort(key=lambda facility: (facility.start_month, facility.name.lower()))
+        assumptions.debt_facilities = tuple(debt_facilities)
 
     risk_totals = [
         _coerce_float(row.get("inherent_risk"))
@@ -333,6 +309,56 @@ def _coerce_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _build_opex_items(
+    cost_rows: List[Dict[str, object]],
+    default_inflation: float,
+) -> Tuple[List[FixedOpexItem], List[VariableOpexItem]]:
+    """Aggregate operating expense overrides into fixed and variable item lists."""
+
+    fixed_map: Dict[str, Dict[str, float]] = {}
+    variable_map: Dict[str, Dict[str, float]] = {}
+
+    for row in cost_rows:
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+
+        inflation_rate = max(0.0, _coerce_float(row.get("inflation_rate"), default_inflation))
+        fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
+        variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
+
+        if fixed_cost > 0:
+            entry = fixed_map.setdefault(name, {"cost": 0.0, "inflation": inflation_rate})
+            entry["cost"] += fixed_cost
+            entry["inflation"] = inflation_rate
+
+        if variable_cost > 0:
+            entry = variable_map.setdefault(name, {"cost": 0.0, "inflation": inflation_rate})
+            entry["cost"] += variable_cost
+            entry["inflation"] = inflation_rate
+
+    fixed_items = [
+        FixedOpexItem(
+            name=name,
+            annual_cost=0.0,
+            inflation_rate=data["inflation"],
+            cost_per_mwh=data["cost"],
+        )
+        for name, data in sorted(fixed_map.items())
+    ]
+
+    variable_items = [
+        VariableOpexItem(
+            name=f"{name} Variable",
+            cost_per_mwh=data["cost"],
+            escalation_rate=data["inflation"],
+        )
+        for name, data in sorted(variable_map.items())
+    ]
+
+    return fixed_items, variable_items
 
 
 def _coerce_optional_float(value: object) -> float | None:
