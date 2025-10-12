@@ -1241,7 +1241,7 @@ def _render_operating_expense_section() -> None:
         row_id = row.get("id") or uuid.uuid4().hex
         row["id"] = row_id
         with st.container(border=True):
-            col_name, col_fixed, col_variable, col_infl, col_buttons, col_remove = st.columns([3, 2, 2, 2, 2, 1])
+            col_name, col_fixed, col_variable, col_infl, col_remove = st.columns([3, 2, 2, 2, 1])
             name = col_name.text_input(
                 "Expense Item",
                 value=str(row.get("name", "")),
@@ -1264,22 +1264,10 @@ def _render_operating_expense_section() -> None:
                 format="%.4f",
             )
 
-            inflation_key = f"{state_key}_inflation_{row_id}"
-            if inflation_key not in st.session_state:
-                st.session_state[inflation_key] = float(row.get("inflation_rate", 0.0)) * 100.0
-
-            inc_col, dec_col = col_buttons.columns(2)
-            inc_clicked = inc_col.button("+%", key=f"{state_key}_increase_{row_id}")
-            dec_clicked = dec_col.button("-%", key=f"{state_key}_decrease_{row_id}")
-            if inc_clicked:
-                st.session_state[inflation_key] = min(st.session_state[inflation_key] + 0.5, 100.0)
-            if dec_clicked:
-                st.session_state[inflation_key] = max(st.session_state[inflation_key] - 0.5, 0.0)
-
             inflation_percent = col_infl.number_input(
                 "Annual Escalation (%)",
-                value=st.session_state[inflation_key],
-                key=inflation_key,
+                value=float(row.get("inflation_rate", 0.0)) * 100.0,
+                key=f"{state_key}_inflation_{row_id}",
                 min_value=0.0,
                 max_value=100.0,
                 step=0.1,
@@ -1316,7 +1304,6 @@ def _render_operating_expense_section() -> None:
                 "inflation_rate": 0.0,
             }
         )
-        st.session_state[f"{state_key}_inflation_{new_id}"] = 0.0
 
 
 def _render_accounts_receivable_section() -> None:
