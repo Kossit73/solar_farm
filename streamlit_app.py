@@ -59,7 +59,7 @@ def _run_model(
     overrides = dict(override_items)
     seasonality_list = _rows_from_tuple(seasonality_rows, ("month", "share"))
     labour_list = _rows_from_tuple(labour_rows, ("role", "annual_cost"))
-    cost_list = _rows_from_tuple(cost_rows, ("product", "fixed_cost", "variable_cost"))
+    cost_list = _rows_from_tuple(cost_rows, ("name", "fixed_cost", "variable_cost", "inflation_rate"))
     receivable_list = _rows_from_tuple(
         receivable_rows,
         ("year", "days_in_year", "receivable_days", "prepaid_expense_days", "other_asset_days"),
@@ -147,28 +147,40 @@ def _run_model(
     fixed_items = list(assumptions.fixed_opex)
     variable_items = list(assumptions.variable_opex)
 
+    expense_names = {
+        str(row.get("name", "")).strip()
+        for row in cost_list
+        if str(row.get("name", "")).strip()
+    }
+    if expense_names:
+        fixed_items = [item for item in fixed_items if item.name not in expense_names]
+        variable_override_names = {f"{name} Variable" for name in expense_names}
+        variable_items = [item for item in variable_items if item.name not in variable_override_names]
+
+    for row in cost_list:
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
+        variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
+        inflation_rate = max(0.0, _coerce_float(row.get("inflation_rate"), inflation_default))
+        fixed_items.append(
+            FixedOpexItem(name=name, annual_cost=fixed_cost, inflation_rate=inflation_rate)
+        )
+        if variable_cost > 0:
+            variable_items.append(
+                VariableOpexItem(
+                    name=f"{name} Variable",
+                    cost_per_mwh=variable_cost,
+                    escalation_rate=inflation_rate,
+                )
+            )
+
     for row in labour_list:
         role = str(row.get("role", "")).strip()
         cost = _coerce_float(row.get("annual_cost"))
         if role and cost > 0:
             fixed_items.append(FixedOpexItem(name=role, annual_cost=cost, inflation_rate=inflation_default))
-
-    for row in cost_list:
-        product = str(row.get("product", "")).strip()
-        fixed_cost = _coerce_float(row.get("fixed_cost"))
-        variable_cost = _coerce_float(row.get("variable_cost"))
-        if product and fixed_cost > 0:
-            fixed_items.append(
-                FixedOpexItem(name=f"{product} Fixed", annual_cost=fixed_cost, inflation_rate=inflation_default)
-            )
-        if product and variable_cost > 0:
-            variable_items.append(
-                VariableOpexItem(
-                    name=f"{product} Variable",
-                    cost_per_mwh=variable_cost,
-                    escalation_rate=inflation_default,
-                )
-            )
 
     if fixed_items:
         assumptions.fixed_opex = tuple(fixed_items)
@@ -691,11 +703,49 @@ LABOUR_DEFAULTS = [
 ]
 
 
-FIXED_VARIABLE_DEFAULTS = [
-    {"product": "Operations Support", "fixed_cost": 65_000.0, "variable_cost": 1.75},
-    {"product": "Grid Compliance", "fixed_cost": 40_000.0, "variable_cost": 0.85},
-    {"product": "Vegetation Control", "fixed_cost": 35_000.0, "variable_cost": 0.60},
-    {"product": "Monitoring", "fixed_cost": 25_000.0, "variable_cost": 0.45},
+OPERATING_EXPENSE_DEFAULTS = [
+    {
+        "id": "insurance",
+        "name": "Insurance",
+        "fixed_cost": 20_000.0,
+        "variable_cost": 0.0,
+        "inflation_rate": 0.02,
+    },
+    {
+        "id": "om_contract",
+        "name": "O&M Service Contract",
+        "fixed_cost": 6_000.0,
+        "variable_cost": 0.0,
+        "inflation_rate": 0.02,
+    },
+    {
+        "id": "vegetation",
+        "name": "Vegetation Management",
+        "fixed_cost": 10_000.0,
+        "variable_cost": 0.0,
+        "inflation_rate": 0.02,
+    },
+    {
+        "id": "g_and_a",
+        "name": "General & Administrative",
+        "fixed_cost": 100_000.0,
+        "variable_cost": 0.0,
+        "inflation_rate": 0.03,
+    },
+    {
+        "id": "sales_marketing",
+        "name": "Sales & Marketing",
+        "fixed_cost": 8_500.0,
+        "variable_cost": 0.0,
+        "inflation_rate": 0.02,
+    },
+    {
+        "id": "research_development",
+        "name": "Research & Development",
+        "fixed_cost": 7_650.0,
+        "variable_cost": 0.0,
+        "inflation_rate": 0.02,
+    },
 ]
 
 
@@ -1153,44 +1203,94 @@ def _render_labour_structure_section() -> None:
         st.session_state[state_key].append({"role": "New Role", "annual_cost": 0.0})
 
 
-def _render_fixed_variable_costs_section() -> None:
-    state_key = "fixed_variable_costs"
+def _render_operating_expense_section() -> None:
+    state_key = "operating_expenses"
     if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(FIXED_VARIABLE_DEFAULTS)
+        st.session_state[state_key] = copy.deepcopy(OPERATING_EXPENSE_DEFAULTS)
 
-    st.markdown("### Fixed & Variable Costs Input Table")
+    st.markdown("### Operating Expenses Input Table")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    for idx, row in enumerate(rows):
+    for row in rows:
+        row_id = row.get("id") or uuid.uuid4().hex
+        row["id"] = row_id
         with st.container(border=True):
-            col_product, col_fixed, col_variable, col_remove = st.columns([3, 2, 2, 1])
-            product = col_product.text_input(
-                "Product",
-                value=str(row.get("product", "")),
-                key=f"{state_key}_product_{idx}",
+            col_name, col_fixed, col_variable, col_infl, col_buttons, col_remove = st.columns([3, 2, 2, 2, 2, 1])
+            name = col_name.text_input(
+                "Expense Item",
+                value=str(row.get("name", "")),
+                key=f"{state_key}_name_{row_id}",
             )
             fixed_cost = col_fixed.number_input(
                 "Fixed Cost",
                 value=float(row.get("fixed_cost", 0.0)),
-                key=f"{state_key}_fixed_{idx}",
+                key=f"{state_key}_fixed_{row_id}",
                 min_value=0.0,
-                step=0.01,
+                step=100.0,
+                format="%.2f",
             )
             variable_cost = col_variable.number_input(
                 "Variable Cost",
                 value=float(row.get("variable_cost", 0.0)),
-                key=f"{state_key}_variable_{idx}",
+                key=f"{state_key}_variable_{row_id}",
                 min_value=0.0,
                 step=0.01,
+                format="%.4f",
             )
-            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
+
+            inflation_key = f"{state_key}_inflation_{row_id}"
+            if inflation_key not in st.session_state:
+                st.session_state[inflation_key] = float(row.get("inflation_rate", 0.0)) * 100.0
+
+            inc_col, dec_col = col_buttons.columns(2)
+            inc_clicked = inc_col.button("+%", key=f"{state_key}_increase_{row_id}")
+            dec_clicked = dec_col.button("-%", key=f"{state_key}_decrease_{row_id}")
+            if inc_clicked:
+                st.session_state[inflation_key] = min(st.session_state[inflation_key] + 0.5, 100.0)
+            if dec_clicked:
+                st.session_state[inflation_key] = max(st.session_state[inflation_key] - 0.5, 0.0)
+
+            inflation_percent = col_infl.number_input(
+                "Annual Escalation (%)",
+                value=st.session_state[inflation_key],
+                key=inflation_key,
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.2f",
+            )
+
+            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{row_id}")
+
         if remove_clicked:
+            for suffix in ("name", "fixed", "variable", "inflation"):
+                st.session_state.pop(f"{state_key}_{suffix}_{row_id}", None)
             continue
-        updated_rows.append({"product": product, "fixed_cost": fixed_cost, "variable_cost": variable_cost})
+
+        updated_rows.append(
+            {
+                "id": row_id,
+                "name": name,
+                "fixed_cost": float(fixed_cost),
+                "variable_cost": float(variable_cost),
+                "inflation_rate": float(inflation_percent) / 100.0,
+            }
+        )
+
     st.session_state[state_key] = updated_rows
 
-    if st.button("Add Product Cost", key=f"{state_key}_add"):
-        st.session_state[state_key].append({"product": "New Product", "fixed_cost": 0.0, "variable_cost": 0.0})
+    if st.button("Add Expense Item", key=f"{state_key}_add"):
+        new_id = uuid.uuid4().hex
+        st.session_state[state_key].append(
+            {
+                "id": new_id,
+                "name": "New Expense",
+                "fixed_cost": 0.0,
+                "variable_cost": 0.0,
+                "inflation_rate": 0.0,
+            }
+        )
+        st.session_state[f"{state_key}_inflation_{new_id}"] = 0.0
 
 
 def _render_accounts_receivable_section() -> None:
@@ -1957,7 +2057,7 @@ def _render_assumption_controls() -> tuple[
     _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
     seasonality_rows = _render_seasonality_table()
     _render_labour_structure_section()
-    _render_fixed_variable_costs_section()
+    _render_operating_expense_section()
     _render_accounts_receivable_section()
     _render_inventory_payables_section()
     _render_fixed_assets_section()
@@ -2014,12 +2114,13 @@ def _render_assumption_controls() -> tuple[
 
     cost_rows = [
         {
-            "product": str(row.get("product", "")).strip(),
+            "name": str(row.get("name", "")).strip(),
             "fixed_cost": float(row.get("fixed_cost", 0.0)),
             "variable_cost": float(row.get("variable_cost", 0.0)),
+            "inflation_rate": float(row.get("inflation_rate", 0.0)),
         }
-        for row in st.session_state.get("fixed_variable_costs", [])
-        if str(row.get("product", "")).strip()
+        for row in st.session_state.get("operating_expenses", [])
+        if str(row.get("name", "")).strip()
     ]
 
     receivable_rows = copy.deepcopy(st.session_state.get("accounts_receivable", []))
@@ -3661,7 +3762,7 @@ with tabs[0]:
 
 seasonality_tuple = _tupleize(seasonality_rows, ("month", "share"))
 labour_tuple = _tupleize(labour_rows, ("role", "annual_cost"))
-cost_tuple = _tupleize(cost_rows, ("product", "fixed_cost", "variable_cost"))
+cost_tuple = _tupleize(cost_rows, ("name", "fixed_cost", "variable_cost", "inflation_rate"))
 receivable_tuple = _tupleize(
     receivable_rows,
     ("year", "days_in_year", "receivable_days", "prepaid_expense_days", "other_asset_days"),
