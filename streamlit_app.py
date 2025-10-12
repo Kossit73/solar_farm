@@ -1618,6 +1618,9 @@ def _render_initial_investment_section() -> None:
     st.session_state[state_key] = updated_rows
     _sync_initial_investment_to_fixed_assets()
 
+    total_equity = sum(float(row.get("amount", 0.0)) for row in st.session_state[state_key])
+    st.markdown(f"**Total Equity:** ${total_equity:,.2f}")
+
     st.caption(
         "Depreciation schedules are generated automatically from these entries; "
         "a separate fixed asset editor is no longer required."
