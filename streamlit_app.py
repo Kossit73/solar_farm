@@ -126,6 +126,10 @@ def _run_model(
             temp_path.unlink()
 
     # Apply overrides captured from the UI
+    project_name_override = str(overrides.get("project_name", "")).strip()
+    if project_name_override:
+        assumptions.global_assumptions.project_name = project_name_override
+
     assumptions.global_assumptions.discount_rate = float(overrides["discount_rate"])
     assumptions.global_assumptions.exit_multiple = float(overrides["exit_multiple"])
     assumptions.global_assumptions.include_terminal_value = bool(overrides["include_terminal"])
@@ -2336,7 +2340,7 @@ def _get_row_value(state_key: str, field_id: str, default: float | bool, expecte
 
 def _render_assumption_controls() -> tuple[
     bytes | None,
-    Dict[str, float | bool | int],
+    Dict[str, float | bool | int | str],
     List[Dict[str, object]],
     List[Dict[str, object]],
     List[Dict[str, object]],
@@ -2391,11 +2395,17 @@ def _render_assumption_controls() -> tuple[
 
     excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
 
-    overrides: Dict[str, float | bool] = {
+    project_name_override = (
+        str(st.session_state.get("project_name_override", DEFAULT_PROJECT_NAME)).strip()
+        or DEFAULT_PROJECT_NAME
+    )
+
+    overrides: Dict[str, float | bool | str] = {
         "discount_rate": float(_get_row_value("core_table", "discount_rate", 0.10, float)),
         "exit_multiple": float(_get_row_value("core_table", "exit_multiple", 5.0, float)),
         "include_terminal": bool(_get_row_value("core_table", "include_terminal", True, bool)),
         "terminal_growth_rate": float(_get_row_value("core_table", "terminal_growth_rate", 0.02, float)),
+        "project_name": project_name_override,
         "income_tax_rate": float(_get_row_value("global_table", "income_tax_rate", 0.25, float)),
         "capital_gains_tax_rate": float(
             _get_row_value("global_table", "capital_gains_tax_rate", 0.10, float)
@@ -2485,6 +2495,18 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
     horizon_months = max(1, int(global_cfg.forecast_months))
     horizon_end = (start_timestamp + pd.DateOffset(months=horizon_months - 1)).date()
     horizon_years = horizon_months / 12.0
+    st.subheader("Core Assumptions")
+
+    default_project_name = st.session_state.get("project_name_override", global_cfg.project_name)
+    project_name_input = st.text_input(
+        "Project Name",
+        value=default_project_name,
+        help="Update the project name used across dashboards and exports.",
+    )
+    project_name_value = project_name_input.strip() or default_project_name
+    st.session_state["project_name_override"] = project_name_value
+    global_cfg.project_name = project_name_value
+
     core_df = pd.DataFrame(
         {
             "Metric": [
@@ -2500,7 +2522,7 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
                 "Project IRR",
             ],
             "Value": [
-                global_cfg.project_name,
+                project_name_value,
                 horizon_months,
                 f"{horizon_years:.1f}",
                 global_cfg.start_date.strftime("%Y-%m-%d"),
@@ -2513,7 +2535,6 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
             ],
         }
     )
-    st.subheader("Core Assumptions")
     st.dataframe(core_df, use_container_width=True, hide_index=True)
 
     st.subheader("Global")
@@ -4057,6 +4078,8 @@ def _render_break_even(outputs: ModelOutputs) -> None:
 
 st.title("Solar Farm Financial Model")
 st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
+
+DEFAULT_PROJECT_NAME = "Solar 123, LLC"
 
 PAGE_OPTIONS = [
     "Input Landing Page",
