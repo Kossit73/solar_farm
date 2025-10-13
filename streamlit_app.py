@@ -139,6 +139,7 @@ def _run_model(
     energy.capacity_mw = float(overrides["capacity_mw"])
     energy.capacity_factor = float(overrides["capacity_factor"])
     energy.degradation_rate = float(overrides["degradation_rate"])
+    energy.annual_hours = max(0, int(round(float(overrides["annual_hours"]))))
 
     if seasonality_list:
         raw_shares: List[float] = [max(0.0, _coerce_float(row.get("share"))) for row in seasonality_list]
@@ -709,6 +710,14 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "min": 0.0,
         "max": 0.10,
         "step": 0.001,
+    },
+    {
+        "id": "annual_hours",
+        "label": "Annual Hours",
+        "value": 8760,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 24.0,
     },
 ]
 
@@ -1320,7 +1329,17 @@ BREAK_EVEN_DEFAULTS: List[Dict[str, object]] = [
 def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None:
     if state_key not in st.session_state:
         st.session_state[state_key] = copy.deepcopy(defaults)
-    elif defaults and "id" in defaults[0]:
+    else:
+        existing_rows = st.session_state[state_key]
+        existing_ids = {str(row.get("id")) for row in existing_rows if row.get("id")}
+        for default_row in defaults:
+            default_id = str(default_row.get("id")) if default_row.get("id") is not None else None
+            if default_id and default_id not in existing_ids:
+                new_row = copy.deepcopy(default_row)
+                existing_rows.append(new_row)
+                existing_ids.add(default_id)
+
+    if defaults and "id" in defaults[0]:
         for row in st.session_state[state_key]:
             row.setdefault("id", uuid.uuid4().hex)
 
@@ -2415,6 +2434,7 @@ def _render_assumption_controls() -> tuple[
         "capacity_mw": float(_get_row_value("energy_table", "capacity_mw", 10.0, float)),
         "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
         "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
+        "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
         "ppa_share": float(_get_row_value("revenue_table", "ppa_share", 0.90, float)),
         "ppa_rate": float(_get_row_value("revenue_table", "ppa_rate", 160.0, float)),
         "ppa_escalation": float(_get_row_value("revenue_table", "ppa_escalation", 0.015, float)),
