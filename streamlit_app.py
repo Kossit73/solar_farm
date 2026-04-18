@@ -4109,10 +4109,7 @@ PAGE_OPTIONS = [
     "Financial Performance",
     "Financial Position",
     "Cash Flow Statement",
-    "Sensitivity Analyses",
-    "Scenario / IFs Analysis",
-    "Monte Carlo Simulation",
-    "Break-Even & Payback",
+    "Key Analytics",
 ]
 
 tabs = st.tabs(PAGE_OPTIONS)
@@ -4234,11 +4231,13 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_financial_position(outputs)
         elif page_name == "Cash Flow Statement":
             _render_cash_flow_statement(outputs)
-        elif page_name == "Sensitivity Analyses":
+        elif page_name == "Key Analytics":
             _render_sensitivity_analysis(assumptions, outputs)
-        elif page_name == "Scenario / IFs Analysis":
+            st.divider()
             _render_scenario_analysis(assumptions, outputs)
-        elif page_name == "Monte Carlo Simulation":
+            st.divider()
             _render_monte_carlo(assumptions)
-        else:
+            st.divider()
             _render_break_even(outputs)
+        else:
+            st.info("Select a page tab to view analytics.")
