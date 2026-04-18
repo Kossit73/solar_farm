@@ -389,6 +389,7 @@ def _internal_model_summary(outputs: ModelOutputs, assumptions: Assumptions) -> 
     monthly = outputs.monthly_results
     annual = outputs.annual_summary
     latest_year = annual.iloc[-1] if not annual.empty else pd.Series(dtype=float)
+    first_year = annual.iloc[0] if not annual.empty else pd.Series(dtype=float)
 
     revenue = float(latest_year.get("revenue_total", float("nan")))
     ebitda = float(latest_year.get("ebitda", float("nan")))
@@ -397,113 +398,143 @@ def _internal_model_summary(outputs: ModelOutputs, assumptions: Assumptions) -> 
     annual_debt_service = float(latest_year.get("debt_interest", 0.0) + latest_year.get("debt_principal", 0.0))
     dscr = _safe_ratio(float(latest_year.get("ebitda", float("nan"))), annual_debt_service) if annual_debt_service else float("nan")
 
+    annual_energy = float(monthly["energy_mwh"].sum()) / max(1.0, assumptions.global_assumptions.forecast_months / 12.0)
+    total_capex = float(sum(item.amount for item in assumptions.capex_items))
+    total_fixed_opex = float(sum(getattr(item, "annual_cost", 0.0) for item in assumptions.fixed_opex))
+    weighted_variable_opex = float(sum(item.cost_per_mwh for item in assumptions.variable_opex))
+    lcoe_proxy = _safe_ratio(total_fixed_opex + annual_energy * weighted_variable_opex, annual_energy) if annual_energy else float("nan")
+
     return {
         "project_npv": float(outputs.metrics.get("project_npv", float("nan"))),
         "project_irr": float(outputs.metrics.get("project_irr", float("nan"))),
         "equity_irr": float(outputs.metrics.get("equity_irr", float("nan"))),
+        "investor_irr": float(outputs.metrics.get("investor_irr", float("nan"))),
         "revenue": revenue,
+        "revenue_year_1": float(first_year.get("revenue_total", float("nan"))),
         "ebitda": ebitda,
         "net_income": net_income,
         "ebitda_margin": _safe_ratio(ebitda, revenue) if revenue else float("nan"),
         "debt_balance": debt_balance,
         "debt_to_ebitda": _safe_ratio(debt_balance, ebitda) if ebitda else float("nan"),
         "dscr_proxy": dscr,
+        "capex_total": total_capex,
+        "capex_per_mw": _safe_ratio(total_capex, assumptions.energy.capacity_mw),
+        "opex_per_mw": _safe_ratio(total_fixed_opex, assumptions.energy.capacity_mw),
+        "opex_per_mwh": weighted_variable_opex,
+        "lcoe_proxy": lcoe_proxy,
+        "ppa_rate": float(assumptions.revenue.ppa.rate_curve.initial),
+        "merchant_rate": float(assumptions.revenue.merchant.rate_curve.initial),
         "capacity_factor": float(assumptions.energy.capacity_factor),
+        "capacity_mw": float(assumptions.energy.capacity_mw),
         "discount_rate": float(assumptions.global_assumptions.discount_rate),
+        "exit_multiple": float(assumptions.global_assumptions.exit_multiple),
     }
 
 
-def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptions) -> None:
-    st.header("AI Benchmark Assistant")
-    st.caption(
-        "Ask a model question (valuation, profitability, leverage, pricing, efficiency, risk). "
-        "The assistant combines model outputs with web benchmark references."
+def _build_structured_ai_response(
+    question: str,
+    model_data: Dict[str, float],
+    benchmark_range: Dict[str, str],
+    sources: List[Dict[str, str]],
+    question_type: str,
+    prior_messages: List[Dict[str, str]],
+) -> str:
+    """Generate a structured, auditable response grounded in model + benchmark context."""
+
+    status = "conservative"
+    if pd.notna(model_data.get("project_npv")) and model_data.get("project_npv", 0.0) < 0:
+        status = "high-risk"
+    if pd.notna(model_data.get("equity_irr")) and model_data.get("equity_irr", 0.0) > 0.15:
+        status = "aggressive upside"
+
+    memory_note = (
+        f"Using {len(prior_messages)} prior exchanges to maintain continuity."
+        if prior_messages
+        else "No prior chat context yet in this session."
     )
-    question = st.text_area("Question", placeholder="Example: Is this model's leverage conservative versus market norms?")
-    if not st.button("Generate benchmarked answer"):
-        return
-    if not question.strip():
-        st.warning("Enter a question to run the benchmark assistant.")
+
+    sources_md = "\n".join([f"- {s['title']}: {s['url']}" for s in sources]) or "- No live benchmark sources retrieved."
+    benchmark_md = "\n".join([f"- {k.replace('_', ' ').title()}: {v}" for k, v in benchmark_range.items()]) or "- No benchmark range mapping for this question type."
+
+    return (
+        "### 1) Direct answer\n"
+        f"This is a **{question_type}** question; the current model looks **{status}** after combining internal outputs with benchmark context.\n\n"
+        "### 2) Internal model insight\n"
+        f"- Project NPV: `{model_data['project_npv']:,.0f}`\n"
+        f"- Project IRR / Equity IRR / Investor IRR: `{model_data['project_irr']:.2%}` / `{model_data['equity_irr']:.2%}` / `{model_data['investor_irr']:.2%}`\n"
+        f"- Revenue (Y1 → latest): `{model_data['revenue_year_1']:,.0f}` → `{model_data['revenue']:,.0f}`\n"
+        f"- EBITDA margin: `{model_data['ebitda_margin']:.2%}`\n"
+        f"- Debt/EBITDA (proxy): `{model_data['debt_to_ebitda']:.2f}x` and DSCR proxy `{model_data['dscr_proxy']:.2f}x`\n"
+        f"- CAPEX total / CAPEX per MW: `{model_data['capex_total']:,.0f}` / `{model_data['capex_per_mw']:,.0f}`\n"
+        f"- OPEX per MW / OPEX per MWh: `{model_data['opex_per_mw']:,.0f}` / `{model_data['opex_per_mwh']:,.2f}`\n"
+        f"- LCOE proxy: `{model_data['lcoe_proxy']:,.2f}` per MWh\n"
+        f"- Capacity factor, PPA rate, merchant rate: `{model_data['capacity_factor']:.2%}`, `{model_data['ppa_rate']:,.2f}`, `{model_data['merchant_rate']:,.2f}`\n\n"
+        "### 3) External benchmark comparison\n"
+        f"{benchmark_md}\n\n"
+        "### 4) Interpretation\n"
+        f"- Relative status assessment: **{status}**.\n"
+        "- Guardrails: distinguish model facts above from benchmark assumptions below.\n"
+        f"- Context continuity: {memory_note}\n"
+        "- If benchmark evidence is weak, treat conclusions as directional and validate with transaction-specific comps.\n\n"
+        "### 5) Recommendation\n"
+        "- Stress-test the highest-sensitivity assumptions for this topic (pricing, capacity factor, opex, debt terms).\n"
+        "- Validate CAPEX/OPEX and return assumptions against one contracted case and one merchant-downside case.\n"
+        "- If DSCR proxy or return metrics fall outside target ranges, rebalance leverage and commercial structure before IC.\n\n"
+        "### 6) Sources\n"
+        "- Internal model: current run outputs and assumptions from this session.\n"
+        "- External benchmark references:\n"
+        f"{sources_md}"
+    )
+
+
+def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptions) -> None:
+    st.header("AI Reasoning Chatbot")
+    st.caption(
+        "Model-grounded and benchmark-aware copilot for valuation, profitability, leverage, pricing, efficiency, and risk."
+    )
+
+    if "ai_chat_history" not in st.session_state:
+        st.session_state["ai_chat_history"] = []
+
+    model_data = _internal_model_summary(outputs, assumptions)
+    with st.expander("Current model context used by chatbot", expanded=False):
+        context_df = pd.DataFrame(
+            [{"metric": k, "value": v} for k, v in model_data.items()]
+        )
+        st.dataframe(context_df, use_container_width=True)
+
+    for item in st.session_state["ai_chat_history"]:
+        with st.chat_message("user"):
+            st.write(item["question"])
+        with st.chat_message("assistant"):
+            st.markdown(item["answer"])
+
+    prompt = st.chat_input("Ask about IRR, DSCR, CAPEX/MW, OPEX/MWh, valuation realism, feasibility, etc.")
+    if not prompt:
         return
 
-    q_type = _classify_question_type(question)
-    model_data = _internal_model_summary(outputs, assumptions)
-    query = QUESTION_TYPE_QUERIES.get(q_type, QUESTION_TYPE_QUERIES["valuation"])
+    question_type = _classify_question_type(prompt)
+    query = QUESTION_TYPE_QUERIES.get(question_type, QUESTION_TYPE_QUERIES["valuation"])
     try:
-        sources = _web_search_benchmarks(query, max_results=4)
+        sources = _web_search_benchmarks(query, max_results=5)
     except Exception:
         sources = []
-
-    benchmark_range = BENCHMARK_REFERENCE_RANGES.get(q_type, {})
-
-    direct_answer = (
-        f"The question is primarily **{q_type}**; based on current model outputs, "
-        f"the model appears **{'strong' if pd.notna(model_data.get('project_npv')) and model_data.get('project_npv', 0) > 0 else 'weak'}** "
-        "pending benchmark validation."
+    benchmark_range = BENCHMARK_REFERENCE_RANGES.get(question_type, {})
+    answer = _build_structured_ai_response(
+        prompt,
+        model_data,
+        benchmark_range,
+        sources,
+        question_type,
+        st.session_state["ai_chat_history"],
     )
 
-    st.markdown("### 1) Direct answer")
-    st.write(direct_answer)
+    st.session_state["ai_chat_history"].append({"question": prompt, "answer": answer})
 
-    st.markdown("### 2) Internal model analysis")
-    st.markdown(
-        f"- Project NPV: `{model_data['project_npv']:,.0f}`\n"
-        f"- Project IRR: `{model_data['project_irr']:.2%}`\n"
-        f"- Equity IRR: `{model_data['equity_irr']:.2%}`\n"
-        f"- Revenue (latest year): `{model_data['revenue']:,.0f}`\n"
-        f"- EBITDA margin (latest year): `{model_data['ebitda_margin']:.2%}`\n"
-        f"- Debt/EBITDA (proxy): `{model_data['debt_to_ebitda']:.2f}x`\n"
-        f"- DSCR proxy (EBITDA / debt service): `{model_data['dscr_proxy']:.2f}x`\n"
-        f"- Capacity factor assumption: `{model_data['capacity_factor']:.2%}`\n"
-        f"- Discount rate: `{model_data['discount_rate']:.2%}`"
-    )
-
-    st.markdown("### 3) External benchmark analysis")
-    if benchmark_range:
-        for key, val in benchmark_range.items():
-            st.markdown(f"- Benchmark reference for **{key.replace('_', ' ').title()}**: {val}")
-    if sources:
-        st.markdown("- Web benchmark references:")
-        for src in sources:
-            st.markdown(f"  - [{src['title']}]({src['url']})")
-    else:
-        st.markdown("- Could not retrieve live benchmark sources at runtime; use listed ranges as provisional references.")
-
-    st.markdown("### 4) Comparison and interpretation")
-    comparison_points: List[str] = []
-    if "equity_irr" in benchmark_range and pd.notna(model_data["equity_irr"]):
-        comparison_points.append(
-            f"- Equity IRR is `{model_data['equity_irr']:.2%}` versus benchmark {benchmark_range['equity_irr']}."
-        )
-    if "ebitda_margin" in benchmark_range and pd.notna(model_data["ebitda_margin"]):
-        comparison_points.append(
-            f"- EBITDA margin is `{model_data['ebitda_margin']:.2%}` versus benchmark {benchmark_range['ebitda_margin']}."
-        )
-    if "debt_to_ebitda" in benchmark_range and pd.notna(model_data["debt_to_ebitda"]):
-        comparison_points.append(
-            f"- Debt/EBITDA proxy is `{model_data['debt_to_ebitda']:.2f}x` versus benchmark {benchmark_range['debt_to_ebitda']}."
-        )
-    if "dscr" in benchmark_range and pd.notna(model_data["dscr_proxy"]):
-        comparison_points.append(
-            f"- DSCR proxy is `{model_data['dscr_proxy']:.2f}x` versus benchmark {benchmark_range['dscr']}."
-        )
-    st.markdown("\n".join(comparison_points) if comparison_points else "- Additional topic-specific comparison requires targeted model metric extraction.")
-
-    st.markdown("### 5) Decision-quality recommendation")
-    st.markdown(
-        "- Stress-test the primary driver linked to your question type (e.g., pricing for valuation, opex for margin, debt terms for leverage).\n"
-        "- Validate assumptions with one contracted-case and one downside merchant-case benchmark set before decision sign-off.\n"
-        "- Prioritize any metric outside benchmark ranges for immediate assumption review."
-    )
-
-    st.markdown("### 6) Sources")
-    st.markdown("- **Internal model outputs**: generated from this app run (monthly and annual model outputs).")
-    if sources:
-        st.markdown("- **External benchmark references**:")
-        for src in sources:
-            st.markdown(f"  - {src['url']}")
-    else:
-        st.markdown("- **External benchmark references**: live web search unavailable during this run.")
+    with st.chat_message("user"):
+        st.write(prompt)
+    with st.chat_message("assistant"):
+        st.markdown(answer)
 
 
 def _excel_title(ws, title: str, subtitle: str) -> None:
