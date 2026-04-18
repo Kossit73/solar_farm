@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import math
 import tempfile
 import uuid
@@ -13,6 +14,10 @@ from typing import Callable, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from solar_farm_financial_model.data_loader import load_assumptions
 from solar_farm_financial_model.model import (
@@ -307,6 +312,222 @@ def _format_metric(name: str, value: float) -> str:
 
 def _downloadable_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=True).encode("utf-8")
+
+
+def _excel_title(ws, title: str, subtitle: str) -> None:
+    ws.merge_cells("A1:H1")
+    ws["A1"] = title
+    ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="0B3D91")
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells("A2:H2")
+    ws["A2"] = subtitle
+    ws["A2"].font = Font(size=11, color="1F2D3D", italic=True)
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[2].height = 22
+
+
+def _write_styled_table(
+    ws,
+    df: pd.DataFrame,
+    title: str,
+    start_row: int,
+    start_col: int = 1,
+) -> int:
+    """Write a styled dataframe section and return the next available row."""
+
+    section_row = start_row
+    ws.cell(row=section_row, column=start_col, value=title)
+    ws.cell(row=section_row, column=start_col).font = Font(size=13, bold=True, color="0B3D91")
+    section_row += 1
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    border = Border(
+        left=Side(style="thin", color="D9E2F3"),
+        right=Side(style="thin", color="D9E2F3"),
+        top=Side(style="thin", color="D9E2F3"),
+        bottom=Side(style="thin", color="D9E2F3"),
+    )
+
+    frame = df.copy()
+    frame = frame.replace([np.inf, -np.inf], np.nan)
+    frame = frame.where(pd.notna(frame), None)
+
+    for col_idx, column_name in enumerate(frame.columns, start=start_col):
+        cell = ws.cell(row=section_row, column=col_idx, value=str(column_name))
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    data_start = section_row + 1
+    for row_offset, values in enumerate(frame.itertuples(index=False), start=0):
+        excel_row = data_start + row_offset
+        for col_idx, value in enumerate(values, start=start_col):
+            cell = ws.cell(row=excel_row, column=col_idx, value=value)
+            cell.border = border
+            column_name = str(frame.columns[col_idx - start_col]).lower()
+            if isinstance(value, (int, float, np.floating)) and value is not None:
+                if "irr" in column_name or "rate" in column_name or "share" in column_name:
+                    cell.number_format = "0.0%"
+                elif "month" in column_name and "payback" in column_name:
+                    cell.number_format = "0"
+                else:
+                    cell.number_format = '#,##0.00;[Red]-#,##0.00'
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            if row_offset % 2 == 1:
+                cell.fill = PatternFill("solid", fgColor="F7FBFF")
+
+    last_row = data_start + max(len(frame) - 1, 0)
+    for col_idx, column_name in enumerate(frame.columns, start=start_col):
+        desired = max(14, min(34, len(str(column_name)) + 4))
+        for value in frame.iloc[:, col_idx - start_col].astype(str).head(30):
+            desired = max(desired, min(34, len(value) + 2))
+        ws.column_dimensions[get_column_letter(col_idx)].width = desired
+
+    return last_row + 2
+
+
+def _downloadable_excel(
+    outputs: ModelOutputs,
+    summary_tables: Dict[str, pd.DataFrame],
+    assumptions: Assumptions,
+) -> bytes:
+    """Create a polished Excel workbook with presentation-ready styling and charts."""
+
+    wb = Workbook()
+    ws_exec = wb.active
+    ws_exec.title = "Executive Summary"
+    _excel_title(
+        ws_exec,
+        f"{assumptions.global_assumptions.project_name} | Investor Pack",
+        "Solar Farm Financial Model • Presentation-ready export",
+    )
+
+    metrics_df = summary_tables["metrics"].copy()
+    metrics_df["metric"] = metrics_df["metric"].map(lambda m: MetricLabels.get(m, str(m).replace("_", " ").title()))
+    metrics_df = metrics_df.rename(columns={"metric": "Metric", "value": "Value"})
+    row = _write_styled_table(ws_exec, metrics_df, "Key Performance Indicators", start_row=4)
+
+    key_drivers_df = summary_tables["key_drivers"].copy()
+    row = _write_styled_table(ws_exec, key_drivers_df, "Key Drivers", start_row=row)
+
+    chart_start = row
+    kpi_chart = BarChart()
+    kpi_chart.title = "KPI Snapshot"
+    kpi_chart.y_axis.title = "Value"
+    data = Reference(ws_exec, min_col=2, min_row=6, max_row=5 + len(metrics_df))
+    cats = Reference(ws_exec, min_col=1, min_row=6, max_row=5 + len(metrics_df))
+    kpi_chart.add_data(data, titles_from_data=False)
+    kpi_chart.set_categories(cats)
+    kpi_chart.width = 12
+    kpi_chart.height = 6
+    ws_exec.add_chart(kpi_chart, f"A{chart_start}")
+
+    ws_annual = wb.create_sheet("Annual Performance")
+    _excel_title(ws_annual, "Annual Financial Performance", "Revenue, profitability, and cash flow trends")
+    annual_df = outputs.annual_summary.reset_index()
+    annual_df = annual_df.rename(columns={annual_df.columns[0]: "Year"})
+    row = _write_styled_table(ws_annual, annual_df, "Annual Summary Table", start_row=4)
+
+    year_col = 1
+    revenue_col = annual_df.columns.get_loc("revenue_total") + 1
+    ebitda_col = annual_df.columns.get_loc("ebitda") + 1
+    fcff_col = annual_df.columns.get_loc("fcff") + 1
+    trend_chart = LineChart()
+    trend_chart.title = "Revenue, EBITDA, and FCFF Trend"
+    trend_chart.y_axis.title = "USD"
+    trend_chart.width = 14
+    trend_chart.height = 6
+    for col in (revenue_col, ebitda_col, fcff_col):
+        data = Reference(ws_annual, min_col=col, min_row=5, max_row=4 + len(annual_df))
+        trend_chart.add_data(data, titles_from_data=True)
+    trend_chart.set_categories(Reference(ws_annual, min_col=year_col, min_row=6, max_row=5 + len(annual_df)))
+    ws_annual.add_chart(trend_chart, f"A{row}")
+
+    ws_cash = wb.create_sheet("Monthly Cash Flow")
+    _excel_title(ws_cash, "Monthly Cash Flow Detail", "FCFF, equity cash flow, and debt profile")
+    monthly_df = outputs.monthly_results.reset_index()[["month_start", "fcff", "equity_cash_flow", "debt_balance"]]
+    monthly_df = monthly_df.rename(
+        columns={
+            "month_start": "Month",
+            "fcff": "FCFF",
+            "equity_cash_flow": "Equity Cash Flow",
+            "debt_balance": "Debt Balance",
+        }
+    )
+    row = _write_styled_table(ws_cash, monthly_df, "Monthly Cash Flow Table", start_row=4)
+    cash_chart = LineChart()
+    cash_chart.title = "Monthly FCFF vs Equity Cash Flow"
+    cash_chart.y_axis.title = "USD"
+    cash_chart.width = 14
+    cash_chart.height = 6
+    cash_chart.add_data(Reference(ws_cash, min_col=2, min_row=5, max_row=4 + len(monthly_df)), titles_from_data=True)
+    cash_chart.add_data(Reference(ws_cash, min_col=3, min_row=5, max_row=4 + len(monthly_df)), titles_from_data=True)
+    cash_chart.set_categories(Reference(ws_cash, min_col=1, min_row=6, max_row=4 + len(monthly_df)))
+    ws_cash.add_chart(cash_chart, f"A{row}")
+
+    ws_mix = wb.create_sheet("Revenue & Opex")
+    _excel_title(ws_mix, "Revenue and Cost Composition", "Annual revenue mix and operating cost structure")
+    revenue_mix = outputs.monthly_results.filter(like="revenue_").resample("YE").sum().reset_index()
+    revenue_date_col = revenue_mix.columns[0]
+    revenue_mix["Year"] = pd.to_datetime(revenue_mix[revenue_date_col]).dt.year
+    revenue_mix = revenue_mix.drop(columns=[revenue_date_col])
+    revenue_mix = revenue_mix[["Year"] + [col for col in revenue_mix.columns if col != "Year"]]
+    row = _write_styled_table(ws_mix, revenue_mix, "Annual Revenue Mix", start_row=4)
+
+    rev_chart = BarChart()
+    rev_chart.type = "col"
+    rev_chart.grouping = "stacked"
+    rev_chart.title = "Revenue Composition by Year"
+    rev_chart.width = 14
+    rev_chart.height = 6
+    rev_chart.add_data(
+        Reference(ws_mix, min_col=2, min_row=5, max_col=revenue_mix.shape[1], max_row=5 + len(revenue_mix)),
+        titles_from_data=True,
+    )
+    rev_chart.set_categories(Reference(ws_mix, min_col=1, min_row=6, max_row=5 + len(revenue_mix)))
+    ws_mix.add_chart(rev_chart, f"A{row}")
+
+    opex_mix = outputs.monthly_results.filter(like="opex_").resample("YE").sum().reset_index()
+    opex_date_col = opex_mix.columns[0]
+    opex_mix["Year"] = pd.to_datetime(opex_mix[opex_date_col]).dt.year
+    opex_mix = opex_mix.drop(columns=[opex_date_col])
+    opex_mix = opex_mix[["Year"] + [col for col in opex_mix.columns if col != "Year"]]
+    opex_start_row = row + 17
+    opex_row = _write_styled_table(ws_mix, opex_mix, "Annual Operating Expense Mix", start_row=opex_start_row)
+    opex_header_row = opex_start_row + 1
+    opex_data_start_row = opex_header_row + 1
+    opex_data_end_row = opex_data_start_row + len(opex_mix) - 1
+    opex_chart = BarChart()
+    opex_chart.type = "col"
+    opex_chart.grouping = "stacked"
+    opex_chart.title = "Opex Composition by Year"
+    opex_chart.width = 14
+    opex_chart.height = 6
+    opex_chart.add_data(
+        Reference(
+            ws_mix,
+            min_col=2,
+            min_row=opex_header_row,
+            max_col=opex_mix.shape[1],
+            max_row=opex_data_end_row,
+        ),
+        titles_from_data=True,
+    )
+    opex_chart.set_categories(
+        Reference(ws_mix, min_col=1, min_row=opex_data_start_row, max_row=opex_data_end_row)
+    )
+    ws_mix.add_chart(opex_chart, f"A{opex_row}")
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
 
 
 def _coerce_float(value: object, default: float = 0.0) -> float:
@@ -2731,7 +2952,9 @@ def _render_cash_flows(outputs: ModelOutputs) -> None:
         st.info("Cash flow outputs are not available for the current run.")
 
 
-def _render_data_and_downloads(outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame]) -> None:
+def _render_data_and_downloads(
+    outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame], assumptions: Assumptions
+) -> None:
     """Expose the raw tables along with download buttons."""
 
     st.subheader("Model tables")
@@ -2746,7 +2969,14 @@ def _render_data_and_downloads(outputs: ModelOutputs, summary_tables: Dict[str, 
 
     st.divider()
     st.subheader("Downloads")
-    st.write("Export CSV extracts for offline analysis.")
+    st.write("Export polished presentation outputs or raw CSV extracts for offline analysis.")
+    workbook_bytes = _downloadable_excel(outputs, summary_tables, assumptions)
+    st.download_button(
+        "Download Investor Presentation Workbook (.xlsx)",
+        data=workbook_bytes,
+        file_name="solar_farm_investor_pack.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
     st.download_button(
         "Download monthly results", data=_downloadable_csv(outputs.monthly_results), file_name="monthly_results.csv"
     )
@@ -4224,7 +4454,7 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             st.header("Cash Flow & Returns")
             _render_cash_flows(outputs)
             st.header("Data & Downloads")
-            _render_data_and_downloads(outputs, summary_tables)
+            _render_data_and_downloads(outputs, summary_tables, assumptions)
         elif page_name == "Financial Performance":
             _render_financial_performance(outputs)
         elif page_name == "Financial Position":
