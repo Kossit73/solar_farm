@@ -4336,9 +4336,7 @@ DEFAULT_PROJECT_NAME = "Solar 123, LLC"
 PAGE_OPTIONS = [
     "Input Landing Page",
     "Key Metrics Dashboard",
-    "Financial Performance",
-    "Financial Position",
-    "Cash Flow Statement",
+    "Financials",
     "Key Analytics",
 ]
 
@@ -4455,11 +4453,11 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_cash_flows(outputs)
             st.header("Data & Downloads")
             _render_data_and_downloads(outputs, summary_tables, assumptions)
-        elif page_name == "Financial Performance":
+        elif page_name == "Financials":
             _render_financial_performance(outputs)
-        elif page_name == "Financial Position":
+            st.divider()
             _render_financial_position(outputs)
-        elif page_name == "Cash Flow Statement":
+            st.divider()
             _render_cash_flow_statement(outputs)
         elif page_name == "Key Analytics":
             _render_sensitivity_analysis(assumptions, outputs)
