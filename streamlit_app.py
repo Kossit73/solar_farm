@@ -386,8 +386,8 @@ def _write_styled_table(
     last_row = data_start + max(len(frame) - 1, 0)
     for col_idx, column_name in enumerate(frame.columns, start=start_col):
         desired = max(14, min(34, len(str(column_name)) + 4))
-        for value in frame.iloc[:, col_idx - start_col].astype(str).head(30):
-            desired = max(desired, min(34, len(value) + 2))
+        for value in frame.iloc[:, col_idx - start_col].head(30):
+            desired = max(desired, min(34, len(str(value)) + 2))
         ws.column_dimensions[get_column_letter(col_idx)].width = desired
 
     return last_row + 2
