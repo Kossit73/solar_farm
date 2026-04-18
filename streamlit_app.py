@@ -3165,16 +3165,6 @@ def _render_assumption_controls() -> tuple[
     _render_inflation_schedule_section()
     _render_risk_schedule_section()
 
-    with st.container(border=True):
-        st.markdown("#### Deployment")
-        st.markdown(
-            """
-            Use the Streamlit Cloud deployer to launch this app directly from your GitHub repository.
-
-            [Deploy on Streamlit Cloud](https://share.streamlit.io/deploy?repository=https://github.com/YOUR_GITHUB_USERNAME/solar_farm&mainScript=streamlit_app.py)
-            """
-        )
-
     excel_bytes = None
 
     project_name_override = (
