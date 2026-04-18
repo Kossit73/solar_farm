@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import copy
 import io
+import html
 import math
+import re
 import tempfile
 import uuid
 from datetime import date
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
@@ -312,6 +316,194 @@ def _format_metric(name: str, value: float) -> str:
 
 def _downloadable_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=True).encode("utf-8")
+
+
+QUESTION_TYPE_QUERIES: Dict[str, str] = {
+    "valuation": "utility scale solar project valuation EV EBITDA IRR benchmark",
+    "profitability": "utility scale solar project EBITDA margin benchmark",
+    "liquidity": "project finance solar DSCR minimum benchmark",
+    "leverage": "project finance debt service coverage ratio covenant utility scale solar",
+    "growth": "utility scale solar revenue growth benchmark power price escalation",
+    "pricing": "US utility scale solar PPA price benchmark",
+    "efficiency": "utility scale solar capacity factor benchmark United States",
+    "risk": "utility scale solar project risk benchmark debt sizing",
+}
+
+
+BENCHMARK_REFERENCE_RANGES: Dict[str, Dict[str, str]] = {
+    "valuation": {"equity_irr": "~8%–12% (contracted) / 12%–18% (merchant-heavy)"},
+    "profitability": {"ebitda_margin": "~55%–85% for mature generation assets"},
+    "liquidity": {"dscr": ">=1.20x base case, >=1.00x downside"},
+    "leverage": {"debt_to_ebitda": "~4.0x–7.0x project-finance range"},
+    "growth": {"annual_escalation": "~1%–3% contracted escalation"},
+    "pricing": {"ppa_price_usd_per_mwh": "region-dependent; commonly benchmarked vs local ISO/utility data"},
+    "efficiency": {"capacity_factor": "~18%–30% utility-scale PV (resource-dependent)"},
+    "risk": {"discount_rate": "~6%–10% contracted, higher for merchant exposure"},
+}
+
+
+def _classify_question_type(question: str) -> str:
+    text = question.lower()
+    keyword_map = {
+        "valuation": ["valuation", "multiple", "ev", "irr", "npv", "moic"],
+        "profitability": ["profit", "margin", "ebitda", "net income"],
+        "liquidity": ["liquidity", "runway", "cash", "working capital"],
+        "leverage": ["debt", "leverage", "dscr", "covenant", "coverage"],
+        "growth": ["growth", "expansion", "increase", "trend"],
+        "pricing": ["price", "ppa", "tariff", "merchant"],
+        "efficiency": ["capacity factor", "efficiency", "utilization", "output"],
+        "risk": ["risk", "stress", "downside", "volatility", "sensitivity"],
+    }
+    for question_type, words in keyword_map.items():
+        if any(word in text for word in words):
+            return question_type
+    return "valuation"
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _web_search_benchmarks(query: str, max_results: int = 4) -> List[Dict[str, str]]:
+    """Simple web search via DuckDuckGo HTML endpoint."""
+
+    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+    req = Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=12) as response:
+        html_text = response.read().decode("utf-8", errors="ignore")
+
+    pattern = re.compile(r'class="result__a" href="(.*?)".*?>(.*?)</a>', re.DOTALL)
+    results: List[Dict[str, str]] = []
+    for match in pattern.finditer(html_text):
+        if len(results) >= max_results:
+            break
+        url = html.unescape(match.group(1))
+        title = re.sub(r"<.*?>", "", html.unescape(match.group(2))).strip()
+        if url and title:
+            results.append({"title": title, "url": url})
+    return results
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator not in (0.0, float("nan")) else float("nan")
+
+
+def _internal_model_summary(outputs: ModelOutputs, assumptions: Assumptions) -> Dict[str, float]:
+    monthly = outputs.monthly_results
+    annual = outputs.annual_summary
+    latest_year = annual.iloc[-1] if not annual.empty else pd.Series(dtype=float)
+
+    revenue = float(latest_year.get("revenue_total", float("nan")))
+    ebitda = float(latest_year.get("ebitda", float("nan")))
+    net_income = float(latest_year.get("net_income", float("nan")))
+    debt_balance = float(monthly.get("debt_balance", pd.Series([0.0])).iloc[-1])
+    annual_debt_service = float(latest_year.get("debt_interest", 0.0) + latest_year.get("debt_principal", 0.0))
+    dscr = _safe_ratio(float(latest_year.get("ebitda", float("nan"))), annual_debt_service) if annual_debt_service else float("nan")
+
+    return {
+        "project_npv": float(outputs.metrics.get("project_npv", float("nan"))),
+        "project_irr": float(outputs.metrics.get("project_irr", float("nan"))),
+        "equity_irr": float(outputs.metrics.get("equity_irr", float("nan"))),
+        "revenue": revenue,
+        "ebitda": ebitda,
+        "net_income": net_income,
+        "ebitda_margin": _safe_ratio(ebitda, revenue) if revenue else float("nan"),
+        "debt_balance": debt_balance,
+        "debt_to_ebitda": _safe_ratio(debt_balance, ebitda) if ebitda else float("nan"),
+        "dscr_proxy": dscr,
+        "capacity_factor": float(assumptions.energy.capacity_factor),
+        "discount_rate": float(assumptions.global_assumptions.discount_rate),
+    }
+
+
+def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptions) -> None:
+    st.header("AI Benchmark Assistant")
+    st.caption(
+        "Ask a model question (valuation, profitability, leverage, pricing, efficiency, risk). "
+        "The assistant combines model outputs with web benchmark references."
+    )
+    question = st.text_area("Question", placeholder="Example: Is this model's leverage conservative versus market norms?")
+    if not st.button("Generate benchmarked answer"):
+        return
+    if not question.strip():
+        st.warning("Enter a question to run the benchmark assistant.")
+        return
+
+    q_type = _classify_question_type(question)
+    model_data = _internal_model_summary(outputs, assumptions)
+    query = QUESTION_TYPE_QUERIES.get(q_type, QUESTION_TYPE_QUERIES["valuation"])
+    try:
+        sources = _web_search_benchmarks(query, max_results=4)
+    except Exception:
+        sources = []
+
+    benchmark_range = BENCHMARK_REFERENCE_RANGES.get(q_type, {})
+
+    direct_answer = (
+        f"The question is primarily **{q_type}**; based on current model outputs, "
+        f"the model appears **{'strong' if pd.notna(model_data.get('project_npv')) and model_data.get('project_npv', 0) > 0 else 'weak'}** "
+        "pending benchmark validation."
+    )
+
+    st.markdown("### 1) Direct answer")
+    st.write(direct_answer)
+
+    st.markdown("### 2) Internal model analysis")
+    st.markdown(
+        f"- Project NPV: `{model_data['project_npv']:,.0f}`\n"
+        f"- Project IRR: `{model_data['project_irr']:.2%}`\n"
+        f"- Equity IRR: `{model_data['equity_irr']:.2%}`\n"
+        f"- Revenue (latest year): `{model_data['revenue']:,.0f}`\n"
+        f"- EBITDA margin (latest year): `{model_data['ebitda_margin']:.2%}`\n"
+        f"- Debt/EBITDA (proxy): `{model_data['debt_to_ebitda']:.2f}x`\n"
+        f"- DSCR proxy (EBITDA / debt service): `{model_data['dscr_proxy']:.2f}x`\n"
+        f"- Capacity factor assumption: `{model_data['capacity_factor']:.2%}`\n"
+        f"- Discount rate: `{model_data['discount_rate']:.2%}`"
+    )
+
+    st.markdown("### 3) External benchmark analysis")
+    if benchmark_range:
+        for key, val in benchmark_range.items():
+            st.markdown(f"- Benchmark reference for **{key.replace('_', ' ').title()}**: {val}")
+    if sources:
+        st.markdown("- Web benchmark references:")
+        for src in sources:
+            st.markdown(f"  - [{src['title']}]({src['url']})")
+    else:
+        st.markdown("- Could not retrieve live benchmark sources at runtime; use listed ranges as provisional references.")
+
+    st.markdown("### 4) Comparison and interpretation")
+    comparison_points: List[str] = []
+    if "equity_irr" in benchmark_range and pd.notna(model_data["equity_irr"]):
+        comparison_points.append(
+            f"- Equity IRR is `{model_data['equity_irr']:.2%}` versus benchmark {benchmark_range['equity_irr']}."
+        )
+    if "ebitda_margin" in benchmark_range and pd.notna(model_data["ebitda_margin"]):
+        comparison_points.append(
+            f"- EBITDA margin is `{model_data['ebitda_margin']:.2%}` versus benchmark {benchmark_range['ebitda_margin']}."
+        )
+    if "debt_to_ebitda" in benchmark_range and pd.notna(model_data["debt_to_ebitda"]):
+        comparison_points.append(
+            f"- Debt/EBITDA proxy is `{model_data['debt_to_ebitda']:.2f}x` versus benchmark {benchmark_range['debt_to_ebitda']}."
+        )
+    if "dscr" in benchmark_range and pd.notna(model_data["dscr_proxy"]):
+        comparison_points.append(
+            f"- DSCR proxy is `{model_data['dscr_proxy']:.2f}x` versus benchmark {benchmark_range['dscr']}."
+        )
+    st.markdown("\n".join(comparison_points) if comparison_points else "- Additional topic-specific comparison requires targeted model metric extraction.")
+
+    st.markdown("### 5) Decision-quality recommendation")
+    st.markdown(
+        "- Stress-test the primary driver linked to your question type (e.g., pricing for valuation, opex for margin, debt terms for leverage).\n"
+        "- Validate assumptions with one contracted-case and one downside merchant-case benchmark set before decision sign-off.\n"
+        "- Prioritize any metric outside benchmark ranges for immediate assumption review."
+    )
+
+    st.markdown("### 6) Sources")
+    st.markdown("- **Internal model outputs**: generated from this app run (monthly and annual model outputs).")
+    if sources:
+        st.markdown("- **External benchmark references**:")
+        for src in sources:
+            st.markdown(f"  - {src['url']}")
+    else:
+        st.markdown("- **External benchmark references**: live web search unavailable during this run.")
 
 
 def _excel_title(ws, title: str, subtitle: str) -> None:
@@ -4988,5 +5180,7 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_monte_carlo(assumptions)
             st.divider()
             _render_break_even(outputs)
+            st.divider()
+            _render_ai_benchmark_assistant(outputs, assumptions)
         else:
             st.info("Select a page tab to view analytics.")
