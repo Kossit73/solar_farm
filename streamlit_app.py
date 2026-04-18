@@ -584,6 +584,20 @@ def _downloadable_excel(
         {"Scenario": "Upside", "Revenue Multiplier": 1.05, "Opex Multiplier": 0.95, "Capex Multiplier": 0.95},
         {"Scenario": "Downside", "Revenue Multiplier": 0.95, "Opex Multiplier": 1.05, "Capex Multiplier": 1.05},
     ]
+
+    def _apply_combo_multipliers(
+        target: Assumptions,
+        revenue_multiplier: float,
+        opex_multiplier: float,
+        capex_multiplier: float,
+    ) -> None:
+        _apply_sensitivity_ppa_rate(target, revenue_multiplier)
+        _apply_sensitivity_merchant_rate(target, revenue_multiplier)
+        _apply_sensitivity_rec_rate(target, revenue_multiplier)
+        _apply_sensitivity_fixed_opex(target, opex_multiplier)
+        _apply_sensitivity_variable_opex(target, opex_multiplier)
+        _apply_sensitivity_capex(target, capex_multiplier)
+
     scenario_records: List[Dict[str, object]] = []
     for row_cfg in scenario_rows:
         if row_cfg["Scenario"] == "Base":
@@ -591,10 +605,11 @@ def _downloadable_excel(
         else:
             metrics = _simulate_metrics(
                 assumptions,
-                lambda a, cfg=row_cfg: (
-                    _apply_revenue_multiplier(a, cfg["Revenue Multiplier"]),
-                    _apply_opex_multiplier(a, cfg["Opex Multiplier"]),
-                    _apply_capex_multiplier(a, cfg["Capex Multiplier"]),
+                lambda a, cfg=row_cfg: _apply_combo_multipliers(
+                    a,
+                    cfg["Revenue Multiplier"],
+                    cfg["Opex Multiplier"],
+                    cfg["Capex Multiplier"],
                 ),
             )
         scenario_records.append(
@@ -627,9 +642,11 @@ def _downloadable_excel(
         opex_mult = float(rng.normal(1.0, 0.04))
         metrics = _simulate_metrics(
             assumptions,
-            lambda a, rm=revenue_mult, om=opex_mult: (
-                _apply_revenue_multiplier(a, rm),
-                _apply_opex_multiplier(a, om),
+            lambda a, rm=revenue_mult, om=opex_mult: _apply_combo_multipliers(
+                a,
+                rm,
+                om,
+                1.0,
             ),
         )
         mc_values.append(
