@@ -1,30 +1,70 @@
-# Solar Farm Financial Model – Improvement Recommendations
+# Investor Attractiveness Review – Solar Farm Financial Model
 
-This note summarizes the main areas where the deterministic engine and the Streamlit tooling can be strengthened to increase analytical robustness, traceability, and IFRS alignment.
+## Executive view
+Using the repository default assumptions (10 MW plant, 20-year horizon, 10% discount rate), the current model produces a **negative project NPV (~-$11.0M)** and **non-meaningful equity/investor IRRs (`NaN`)**. This is a red flag for institutional investors and also indicates that the equity cash flow construction needs to be improved before using IRR as a decision KPI.
 
-## 1. Strengthen automated regression coverage
-- **Why:** The core simulator orchestrates multiple dependent schedules – generation, revenue, operating costs, capex, working capital, taxes, debt, and terminal value – before aggregating them into IFRS-style statements.【F:solar_farm_financial_model/model.py†L115-L183】【F:solar_farm_financial_model/model.py†L480-L499】 Without automated tests, small refactors in any sub-schedule can silently break cash flows or statement roll-ups.
-- **Recommendation:** Introduce a `tests/` suite (e.g., with `pytest`) that feeds curated assumption fixtures through `SolarFarmFinancialModel.run()` and asserts:
-  - Income statement subtotals (revenue, EBITDA, EBIT) reconcile to the monthly drivers.
-  - Cash flow totals tie back to the balance sheet movements and working-capital deltas.
-  - Key metrics (NPV, IRR, payback) remain stable for the canonical workbook.  This provides a regression net before changing depreciation logic or adding new assumptions.
+## What is limiting investor appeal today
 
-## 2. Guard against duplicate operating-expense labels
-- **Observation:** Operating expense columns are keyed by a lower-cased label (`opex_fixed_<slug>` / `opex_variable_<slug>`).【F:solar_farm_financial_model/model.py†L251-L277】 If two inputs share the same label (e.g., two “Maintenance” rows), later iterations overwrite earlier data, leading to understated costs.
-- **Recommendation:** Normalise column names with a deterministic unique suffix (e.g., append an index) or store results in a MultiIndex keyed by both label and UUID. Also surface validation in the Streamlit input table to flag duplicate names before the model runs.
+1. **Equity cash flow is missing an explicit equity contribution draw profile**
+   - The model sets `equity_cash_flow = debt_free_cash_flow` directly, but does not model an initial equity injection line.
+   - Result: investor/equity IRR can become mathematically undefined (`NaN`) because the series may not include a proper negative equity outflow period.
 
-## 3. Expand terminal-value flexibility
-- **Observation:** The exit cash flow is currently calculated with a single trailing EBITDA multiple minus capital-gains tax and outstanding debt.【F:solar_farm_financial_model/model.py†L451-L459】 Real projects often require:
-  - Alternative valuation methods (DCF of a terminal growth perpetuity, book-value-based exits).
-  - Explicit salvage / decommissioning costs and working-capital releases at exit.
-- **Recommendation:** Extend the global assumptions schema to let users pick the terminal methodology, specify salvage costs, and opt-in to releasing working capital. This will make the exit treatment more transparent and adaptable to different mandates.
+2. **No lender-grade credit metrics are reported (DSCR, LLCR, PLCR)**
+   - Investors typically screen utility-scale projects first on debt service coverage and debt tail quality, then on IRR.
+   - The model has debt interest/principal schedules, so those ratios can be computed, but they are not yet surfaced.
 
-## 4. Enhance working-capital modelling fidelity
-- **Observation:** Working-capital balances scale linearly with total opex, even for receivables where revenue is the more appropriate driver.【F:solar_farm_financial_model/model.py†L327-L389】 Inventory and payables also assume a single blended opex base.
-- **Recommendation:** Allow the assumption tables to map each working-capital component to a driver (revenue, variable opex, fixed opex, or energy). This improves accuracy for hybrid business models (e.g., when inventory is tied to merchant sales) and keeps the IFRS balance sheet closer to operational reality.
+3. **Tax-equity and incentive layer is absent**
+   - There is tax logic for income/capital gains, but no explicit modeling of U.S. solar incentives (e.g., ITC/PTC pathways), transferability, or bonus depreciation impacts on after-tax equity returns.
 
-## 5. Improve dependency handling ergonomics
-- **Observation:** Optional imports are guarded in the loaders, but the CLI still surfaces environment-specific guidance when numpy/pandas are missing.【F:solar_farm_financial_model/data_loader.py†L9-L37】【F:solar_farm_financial_model/cli.py†L1-L120】 Users deploying on Streamlit Cloud or Airflow benefit from clearer documentation.
-- **Recommendation:** Ship a `pyproject.toml` or extras section that defines core vs. optional dependencies, and document minimal packages required for headless execution. Pair this with a lightweight smoke test in CI that exercises both the CLI and the Streamlit app in dependency-constrained environments.
+4. **Terminal growth input is present but not used in valuation logic**
+   - `terminal_growth_rate` exists in assumptions and UI, but terminal value uses only exit multiple logic.
+   - This can confuse investment committees and makes valuation methodology look incomplete.
 
-Implementing the above will make the model easier to extend, safer to refactor, and more resilient when different stakeholders contribute custom assumptions.
+5. **Contracting and merchant risk are simplified**
+   - Revenue is modeled from static shares/rates with annual escalation, but without PPA tenor roll-off, shape risk, curtailment risk, merchant price distributions, or basis risk.
+
+## Recommendations to improve investability
+
+## Priority 1 (must-have for IC readiness)
+
+### A) Build a true equity funding schedule
+- Add explicit equity draw line during construction (`equity_contribution`) so total sources = uses each month.
+- Redefine:
+  - `equity_cash_flow_to_investor = -equity_contribution + distributions`
+- Outcome: investor IRR and MOIC become economically meaningful.
+
+### B) Add covenant-grade debt metrics
+- Calculate and report monthly + annual:
+  - DSCR = CFADS / Debt Service
+  - LLCR = NPV(CFADS over loan life) / debt balance
+  - Debt yield = EBITDA / debt balance
+- Add downside case covenant headroom (P50/P90 production and merchant downside).
+
+### C) Add explicit incentives module
+- Add scenario toggles for ITC/PTC treatment and depreciation/tax shield impacts.
+- Show before/after impact on NPV, equity IRR, and payback.
+
+## Priority 2 (value uplift levers)
+
+### D) Expand bankability of revenue stack
+- Model PPA tenor and step-down to merchant pricing after contract expiry.
+- Add curtailment + availability assumptions and optional floor/hedge structure.
+
+### E) Separate O&M into fixed, indexed, and lifecycle replacements
+- Keep current fixed/variable buckets, but add major maintenance reserve and inverter replacement cycle.
+
+### F) Add exit-method choice
+- Keep EBITDA multiple method, and add Gordon-growth option using `terminal_growth_rate`.
+- Let users compare valuation methods side-by-side.
+
+## Quick sensitivity insights from current defaults
+
+Directional tests against defaults show that the largest value lever is **capital structure + capex + contracted price quality together**. A combined scenario (10% capex reduction, 70% debt at 6%, stronger PPA mix/price, and 15% opex reduction) improves project NPV materially versus base case, but still remains negative, indicating that additional structural changes are needed (especially incentives and realistic equity structuring).
+
+## Practical next implementation sprint
+1. **Financial plumbing**: equity contribution schedule + DSCR/LLCR outputs.
+2. **Tax/incentives**: ITC/PTC and depreciation options.
+3. **Revenue risk**: PPA tenor roll-off + merchant downside cases.
+4. **Decision dashboard**: investment committee page with NPV/IRR/MOIC/DSCR covenant summary in base/upside/downside.
+
+These four deliverables will materially improve investor confidence because they address the exact diligence questions asked by infrastructure equity, tax equity, and project finance lenders.

@@ -2650,7 +2650,7 @@ def _render_revenue_and_energy(outputs: ModelOutputs) -> None:
     if not revenue_cols.empty:
         st.markdown("#### Revenue mix")
         st.area_chart(revenue_cols, use_container_width=True)
-        annual_revenue = revenue_cols.resample("A").sum()
+        annual_revenue = revenue_cols.resample("YE").sum()
         annual_revenue.index = annual_revenue.index.year
         st.dataframe(annual_revenue, use_container_width=True)
     else:
@@ -2670,7 +2670,7 @@ def _render_operating_costs(outputs: ModelOutputs) -> None:
     if not opex_cols.empty:
         st.markdown("#### Cost breakdown")
         st.area_chart(opex_cols, use_container_width=True)
-        annual_opex = opex_cols.resample("A").sum()
+        annual_opex = opex_cols.resample("YE").sum()
         annual_opex.index = annual_opex.index.year
         st.dataframe(annual_opex, use_container_width=True)
     else:
@@ -2775,7 +2775,7 @@ def _render_financial_performance(outputs: ModelOutputs) -> None:
     st.dataframe(income_statement, use_container_width=True)
 
     st.header("Gross Revenue Schedule")
-    revenue_schedule = outputs.monthly_results.filter(like="revenue_").resample("A").sum()
+    revenue_schedule = outputs.monthly_results.filter(like="revenue_").resample("YE").sum()
     revenue_schedule.index = revenue_schedule.index.year
     revenue_schedule = revenue_schedule.rename(
         columns=lambda c: c.replace("revenue_", "").replace("_", " ").title()
@@ -2783,7 +2783,7 @@ def _render_financial_performance(outputs: ModelOutputs) -> None:
     st.dataframe(revenue_schedule, use_container_width=True)
 
     st.header("Total Expense Schedule")
-    expense_schedule = outputs.monthly_results.filter(like="opex_").resample("A").sum()
+    expense_schedule = outputs.monthly_results.filter(like="opex_").resample("YE").sum()
     expense_schedule.index = expense_schedule.index.year
     expense_schedule = expense_schedule.rename(
         columns=lambda c: c.replace("opex_", "").replace("_", " ").title()
@@ -2833,7 +2833,7 @@ def _render_financial_position(outputs: ModelOutputs) -> None:
     balance["Equity"] = balance["Total Assets"] - balance["Total Liabilities"]
     balance["Total Liabilities & Equity"] = balance["Total Liabilities"] + balance["Equity"]
 
-    balance_sheet = balance.resample("A").last()
+    balance_sheet = balance.resample("YE").last()
     balance_sheet.index = balance_sheet.index.year
 
     st.header("Statement of Financial Position")
@@ -2844,14 +2844,14 @@ def _render_cash_flow_statement(outputs: ModelOutputs) -> None:
     """Show annual cash flow statement derived from the monthly projection."""
 
     monthly = outputs.monthly_results
-    ebitda = monthly["ebitda"].resample("A").sum()
-    taxes = monthly["tax_payment"].resample("A").sum()
-    interest = monthly["debt_interest"].resample("A").sum()
-    working_cap_change = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("A").sum()
+    ebitda = monthly["ebitda"].resample("YE").sum()
+    taxes = monthly["tax_payment"].resample("YE").sum()
+    interest = monthly["debt_interest"].resample("YE").sum()
+    working_cap_change = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("YE").sum()
     operating_cf = ebitda - taxes - interest - working_cap_change
-    investing_cf = (-monthly["capex"]).resample("A").sum()
-    financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("A").sum()
-    equity_cf = monthly["equity_cash_flow"].resample("A").sum()
+    investing_cf = (-monthly["capex"]).resample("YE").sum()
+    financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("YE").sum()
+    equity_cf = monthly["equity_cash_flow"].resample("YE").sum()
 
     cash_flow = pd.DataFrame(
         {

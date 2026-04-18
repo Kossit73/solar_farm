@@ -478,7 +478,7 @@ class SolarFarmFinancialModel:
 
     # ------------------------------------------------------------------
     def _build_annual_summary(self, monthly: pd.DataFrame) -> pd.DataFrame:
-        annual = monthly.resample("A").agg(
+        annual = monthly.resample("YE").agg(
             {
                 "revenue_total": "sum",
                 "total_opex": "sum",
