@@ -616,6 +616,7 @@ def _write_styled_table(
     return last_row + 2
 
 
+@st.cache_data(show_spinner=False)
 def _downloadable_excel(
     outputs: ModelOutputs,
     summary_tables: Dict[str, pd.DataFrame],
@@ -1173,7 +1174,7 @@ def _downloadable_excel(
 
     rng = np.random.default_rng(42)
     mc_values = []
-    for _ in range(250):
+    for _ in range(100):
         revenue_mult = float(rng.normal(1.0, 0.05))
         opex_mult = float(rng.normal(1.0, 0.04))
         metrics = _simulate_metrics(
@@ -1202,7 +1203,7 @@ def _downloadable_excel(
     mc_chart.width = 12
     mc_chart.height = 5.5
     mc_export = mc_df[["Project NPV"]].reset_index().rename(columns={"index": "Run"})
-    row = _write_styled_table(ws_analytics, mc_export.head(120), "Monte Carlo Simulation", start_row=row + 14)
+    row = _write_styled_table(ws_analytics, mc_export.head(80), "Monte Carlo Simulation", start_row=row + 14)
     mc_chart.add_data(
         Reference(ws_analytics, min_col=2, min_row=row - 121, max_row=row - 2),
         titles_from_data=True,
@@ -3722,14 +3723,32 @@ def _render_data_and_downloads(
 
     st.divider()
     st.subheader("Downloads")
-    st.write("Export polished presentation outputs or raw CSV extracts for offline analysis.")
-    workbook_bytes = _downloadable_excel(outputs, summary_tables, assumptions)
-    st.download_button(
-        "Download Investor Presentation Workbook (.xlsx)",
-        data=workbook_bytes,
-        file_name="solar_farm_investor_pack.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    st.write("Export polished presentation outputs for offline analysis.")
+    workbook_key = "investor_workbook_bytes"
+    workbook_signature = (
+        float(outputs.metrics.get("project_npv", float("nan"))),
+        float(outputs.metrics.get("project_irr", float("nan"))),
+        float(outputs.metrics.get("equity_irr", float("nan"))),
+        float(outputs.metrics.get("investor_irr", float("nan"))),
+        float(outputs.metrics.get("owner_irr", float("nan"))),
+        float(outputs.metrics.get("project_payback_months", float("nan"))),
     )
+    signature_key = "investor_workbook_signature"
+
+    if st.button("Prepare Investor Workbook", key="prepare_investor_workbook"):
+        with st.spinner("Preparing workbook (optimized cache + reduced simulation load)..."):
+            st.session_state[workbook_key] = _downloadable_excel(outputs, summary_tables, assumptions)
+            st.session_state[signature_key] = workbook_signature
+
+    if st.session_state.get(signature_key) == workbook_signature and workbook_key in st.session_state:
+        st.download_button(
+            "Download Investor Presentation Workbook (.xlsx)",
+            data=st.session_state[workbook_key],
+            file_name="solar_farm_investor_pack.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("Click **Prepare Investor Workbook** to generate the latest export for download.")
 
 
 def _render_financial_performance(outputs: ModelOutputs) -> None:
