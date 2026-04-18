@@ -196,6 +196,15 @@ class SolarFarmFinancialModel:
     def _month_in_year(self) -> np.ndarray:
         return np.arange(len(self._timeline)) % 12
 
+    @staticmethod
+    def _escalated_series(initial: float, annual_rate: float, year_index: np.ndarray) -> np.ndarray:
+        """Return a vector of annually-escalated values aligned to month-level year indices."""
+        return initial * (1 + annual_rate) ** year_index
+
+    def _start_month_mask(self, start_month: int) -> np.ndarray:
+        """Return a 0/1 mask that activates values from ``start_month`` onward."""
+        return (np.arange(len(self._timeline)) + 1 >= max(1, int(start_month))).astype(float)
+
     # ------------------------------------------------------------------
     # Energy
     def _compute_energy_profile(self) -> pd.Series:
@@ -224,12 +233,21 @@ class SolarFarmFinancialModel:
         revenue_cfg = self.assumptions.revenue
         years = self._year_index()
 
-        ppa_rate = revenue_cfg.ppa.rate_curve.initial * (1 + revenue_cfg.ppa.rate_curve.annual_escalation) ** years
-        merchant_rate = (
-            revenue_cfg.merchant.rate_curve.initial
-            * (1 + revenue_cfg.merchant.rate_curve.annual_escalation) ** years
+        ppa_rate = self._escalated_series(
+            revenue_cfg.ppa.rate_curve.initial,
+            revenue_cfg.ppa.rate_curve.annual_escalation,
+            years,
         )
-        rec_rate = revenue_cfg.rec.initial * (1 + revenue_cfg.rec.annual_escalation) ** years
+        merchant_rate = self._escalated_series(
+            revenue_cfg.merchant.rate_curve.initial,
+            revenue_cfg.merchant.rate_curve.annual_escalation,
+            years,
+        )
+        rec_rate = self._escalated_series(
+            revenue_cfg.rec.initial,
+            revenue_cfg.rec.annual_escalation,
+            years,
+        )
 
         ppa_energy = energy.values * revenue_cfg.ppa.share_of_output
         merchant_energy = energy.values * revenue_cfg.merchant.share_of_output
@@ -249,7 +267,7 @@ class SolarFarmFinancialModel:
         energy_array = energy.reindex(self._timeline).fillna(0.0).to_numpy()
 
         for item in self.assumptions.fixed_opex:
-            inflation_factor = (1 + item.inflation_rate) ** years
+            inflation_factor = self._escalated_series(1.0, item.inflation_rate, years)
             monthly_cost = np.zeros_like(energy_array, dtype=float)
 
             if getattr(item, "annual_cost", 0.0):
@@ -260,7 +278,7 @@ class SolarFarmFinancialModel:
                 per_mwh_rate = item.cost_per_mwh * inflation_factor
                 monthly_cost += energy_array * per_mwh_rate
 
-            mask = np.arange(len(self._timeline)) + 1 >= getattr(item, "start_month", 1)
+            mask = self._start_month_mask(getattr(item, "start_month", 1))
             fixed[f"opex_fixed_{item.name.lower().replace(' ', '_')}"] = monthly_cost * mask
 
         return fixed
@@ -270,9 +288,9 @@ class SolarFarmFinancialModel:
         variable = pd.DataFrame(index=self._timeline)
 
         for item in self.assumptions.variable_opex:
-            rate = item.cost_per_mwh * (1 + item.escalation_rate) ** years
+            rate = self._escalated_series(item.cost_per_mwh, item.escalation_rate, years)
             cost = energy.values * rate
-            mask = np.arange(len(self._timeline)) + 1 >= item.start_month
+            mask = self._start_month_mask(item.start_month)
             variable[f"opex_variable_{item.name.lower().replace(' ', '_')}"] = cost * mask
         return variable
 
