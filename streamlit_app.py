@@ -524,6 +524,171 @@ def _downloadable_excel(
     cash_sched_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(cash_schedule), max_row=row - 2))
     ws_metrics.add_chart(cash_sched_chart, f"A{row}")
 
+    row += 15
+    monthly_energy = outputs.monthly_results.reset_index()[["month_start", "energy_mwh"]].rename(
+        columns={"month_start": "Month", "energy_mwh": "Monthly Energy Production"}
+    )
+    row = _write_styled_table(ws_metrics, monthly_energy, "Monthly energy production", start_row=row)
+    monthly_energy_chart = LineChart()
+    monthly_energy_chart.title = "Monthly energy production"
+    monthly_energy_chart.width = 13
+    monthly_energy_chart.height = 5.5
+    monthly_energy_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(monthly_energy) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    monthly_energy_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(monthly_energy), max_row=row - 2)
+    )
+    ws_metrics.add_chart(monthly_energy_chart, f"A{row}")
+
+    row += 15
+    annual_energy = outputs.monthly_results["energy_mwh"].resample("YE").sum().reset_index()
+    annual_energy["Year"] = pd.to_datetime(annual_energy["month_start"]).dt.year
+    annual_energy = annual_energy.drop(columns=["month_start"]).rename(columns={"energy_mwh": "Energy production"})
+    row = _write_styled_table(ws_metrics, annual_energy, "Energy production", start_row=row)
+    energy_chart = BarChart()
+    energy_chart.title = "Energy production"
+    energy_chart.width = 12
+    energy_chart.height = 5.5
+    energy_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(annual_energy) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    energy_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(annual_energy), max_row=row - 2))
+    ws_metrics.add_chart(energy_chart, f"A{row}")
+
+    row += 15
+    equity_cf = outputs.monthly_results.reset_index()[["month_start", "equity_cash_flow"]].rename(
+        columns={"month_start": "Month", "equity_cash_flow": "Equity cash flow"}
+    )
+    row = _write_styled_table(ws_metrics, equity_cf, "Equity cash flow", start_row=row)
+    equity_chart = LineChart()
+    equity_chart.title = "Equity cash flow"
+    equity_chart.width = 13
+    equity_chart.height = 5.5
+    equity_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(equity_cf) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    equity_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(equity_cf), max_row=row - 2))
+    ws_metrics.add_chart(equity_chart, f"A{row}")
+
+    row += 15
+    total_opex_monthly = outputs.monthly_results.reset_index()[["month_start", "total_opex"]].rename(
+        columns={"month_start": "Month", "total_opex": "Total operating cost"}
+    )
+    row = _write_styled_table(ws_metrics, total_opex_monthly, "Total operating cost", start_row=row)
+    total_opex_chart = LineChart()
+    total_opex_chart.title = "Total operating cost"
+    total_opex_chart.width = 13
+    total_opex_chart.height = 5.5
+    total_opex_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(total_opex_monthly) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    total_opex_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(total_opex_monthly), max_row=row - 2)
+    )
+    ws_metrics.add_chart(total_opex_chart, f"A{row}")
+
+    row += 15
+    cost_breakdown = outputs.monthly_results.filter(like="opex_").resample("YE").sum().reset_index()
+    cost_breakdown["Year"] = pd.to_datetime(cost_breakdown["month_start"]).dt.year
+    cost_breakdown = cost_breakdown.drop(columns=["month_start"])
+    cost_breakdown = cost_breakdown[["Year"] + [c for c in cost_breakdown.columns if c != "Year"]]
+    row = _write_styled_table(ws_metrics, cost_breakdown, "Cost breakdown", start_row=row)
+    cost_breakdown_chart = BarChart()
+    cost_breakdown_chart.type = "col"
+    cost_breakdown_chart.grouping = "stacked"
+    cost_breakdown_chart.title = "Cost breakdown"
+    cost_breakdown_chart.width = 13
+    cost_breakdown_chart.height = 5.5
+    cost_breakdown_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(cost_breakdown) - 1, max_col=cost_breakdown.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    cost_breakdown_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(cost_breakdown), max_row=row - 2)
+    )
+    ws_metrics.add_chart(cost_breakdown_chart, f"A{row}")
+
+    row += 15
+    capex_debt = outputs.monthly_results.reset_index()[
+        ["month_start", "capex", "debt_draw", "debt_principal", "debt_balance"]
+    ].rename(columns={"month_start": "Month"})
+    row = _write_styled_table(ws_metrics, capex_debt, "Capital expenditure and debt", start_row=row)
+    capex_debt_chart = LineChart()
+    capex_debt_chart.title = "Capital expenditure and debt"
+    capex_debt_chart.width = 13
+    capex_debt_chart.height = 5.5
+    for col in (2, 3, 4, 5):
+        capex_debt_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(capex_debt) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    capex_debt_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(capex_debt), max_row=row - 2)
+    )
+    ws_metrics.add_chart(capex_debt_chart, f"A{row}")
+
+    row += 15
+    cash_returns = outputs.monthly_results.reset_index()[
+        ["month_start", "fcff", "equity_cash_flow", "investor_cash_flow", "owner_cash_flow"]
+    ].rename(columns={"month_start": "Month", "fcff": "FCFF"})
+    row = _write_styled_table(ws_metrics, cash_returns, "Cash Flow & Returns", start_row=row)
+    cash_returns_chart = LineChart()
+    cash_returns_chart.title = "Cash Flow & Returns"
+    cash_returns_chart.width = 13
+    cash_returns_chart.height = 5.5
+    for col in (2, 3, 4, 5):
+        cash_returns_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(cash_returns) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cash_returns_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(cash_returns), max_row=row - 2)
+    )
+    ws_metrics.add_chart(cash_returns_chart, f"A{row}")
+
+    row += 15
+    cumulative_cash = outputs.monthly_results.reset_index()[
+        ["month_start", "fcff", "equity_cash_flow", "investor_cash_flow", "owner_cash_flow"]
+    ].rename(
+        columns={
+            "month_start": "Month",
+            "fcff": "FCFF",
+            "equity_cash_flow": "Equity Cash Flow",
+            "investor_cash_flow": "Investor Cash Flow",
+            "owner_cash_flow": "Owner Cash Flow",
+        }
+    )
+    for col in ["FCFF", "Equity Cash Flow", "Investor Cash Flow", "Owner Cash Flow"]:
+        cumulative_cash[f"Cumulative {col}"] = cumulative_cash[col].cumsum()
+    cumulative_cash = cumulative_cash[
+        [
+            "Month",
+            "Cumulative FCFF",
+            "Cumulative Equity Cash Flow",
+            "Cumulative Investor Cash Flow",
+            "Cumulative Owner Cash Flow",
+        ]
+    ]
+    row = _write_styled_table(ws_metrics, cumulative_cash, "Cumulative cash flows", start_row=row)
+    cumulative_chart = LineChart()
+    cumulative_chart.title = "Cumulative cash flows"
+    cumulative_chart.width = 13
+    cumulative_chart.height = 5.5
+    for col in (2, 3, 4, 5):
+        cumulative_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(cumulative_cash) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cumulative_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(cumulative_cash), max_row=row - 2)
+    )
+    ws_metrics.add_chart(cumulative_chart, f"A{row}")
+
     # ------------------------------------------------------------------
     # Sheet 2: Financials
     ws_fin = wb.create_sheet("Financials")
@@ -814,13 +979,68 @@ def _downloadable_excel(
     mc_chart.width = 12
     mc_chart.height = 5.5
     mc_export = mc_df[["Project NPV"]].reset_index().rename(columns={"index": "Run"})
-    row = _write_styled_table(ws_analytics, mc_export.head(120), "Monte Carlo Sample Paths", start_row=row + 14)
+    row = _write_styled_table(ws_analytics, mc_export.head(120), "Monte Carlo Simulation", start_row=row + 14)
     mc_chart.add_data(
         Reference(ws_analytics, min_col=2, min_row=row - 121, max_row=row - 2),
         titles_from_data=True,
     )
     mc_chart.set_categories(Reference(ws_analytics, min_col=1, min_row=row - 120, max_row=row - 2))
     ws_analytics.add_chart(mc_chart, f"A{row}")
+
+    break_even_inputs = pd.DataFrame(st.session_state.get(BREAK_EVEN_STATE_KEY, BREAK_EVEN_DEFAULTS)).copy()
+    if not break_even_inputs.empty:
+        selected_columns = ["product", "fixed_cost", "variable_cost", "selling_price", "target_profit", "expected_volume"]
+        break_even_inputs = break_even_inputs[[c for c in selected_columns if c in break_even_inputs.columns]]
+        break_even_inputs = break_even_inputs.rename(
+            columns={
+                "product": "Product",
+                "fixed_cost": "Fixed Cost",
+                "variable_cost": "Variable Cost",
+                "selling_price": "Selling Price",
+                "target_profit": "Target Profit",
+                "expected_volume": "Expected Volume",
+            }
+        )
+    row += 15
+    row = _write_styled_table(ws_analytics, break_even_inputs, "Break-even Analysis Inputs", start_row=row)
+
+    break_even_results_records: List[Dict[str, object]] = []
+    for _, be_input in break_even_inputs.iterrows():
+        product = str(be_input.get("Product", "Unlabelled"))
+        fixed_cost = float(be_input.get("Fixed Cost", 0.0))
+        variable_cost = float(be_input.get("Variable Cost", 0.0))
+        selling_price = float(be_input.get("Selling Price", 0.0))
+        target_profit = float(be_input.get("Target Profit", 0.0))
+        contribution = selling_price - variable_cost
+        if contribution > 0:
+            units = (fixed_cost + target_profit) / contribution
+            revenue = units * selling_price
+        else:
+            units = float("nan")
+            revenue = float("nan")
+        break_even_results_records.append(
+            {
+                "Product": product,
+                "Contribution Margin": contribution,
+                "Break-even Units": units,
+                "Break-even Revenue": revenue,
+            }
+        )
+    break_even_results = pd.DataFrame(break_even_results_records)
+    row += 15
+    row = _write_styled_table(ws_analytics, break_even_results, "Break-even Results", start_row=row)
+    break_even_chart = BarChart()
+    break_even_chart.title = "Break-even Results"
+    break_even_chart.width = 12
+    break_even_chart.height = 5.5
+    break_even_chart.add_data(
+        Reference(ws_analytics, min_col=3, min_row=row - len(break_even_results) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    break_even_chart.set_categories(
+        Reference(ws_analytics, min_col=1, min_row=row - len(break_even_results), max_row=row - 2)
+    )
+    ws_analytics.add_chart(break_even_chart, f"A{row}")
 
     be_df = pd.DataFrame(
         {
