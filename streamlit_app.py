@@ -3149,15 +3149,6 @@ def _render_data_and_downloads(
         file_name="solar_farm_investor_pack.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-    st.download_button(
-        "Download monthly results", data=_downloadable_csv(outputs.monthly_results), file_name="monthly_results.csv"
-    )
-    st.download_button(
-        "Download annual summary", data=_downloadable_csv(outputs.annual_summary), file_name="annual_summary.csv"
-    )
-    st.download_button(
-        "Download metrics", data=_downloadable_csv(summary_tables["metrics"]), file_name="metrics.csv"
-    )
 
 
 def _render_financial_performance(outputs: ModelOutputs) -> None:
