@@ -398,132 +398,287 @@ def _downloadable_excel(
     summary_tables: Dict[str, pd.DataFrame],
     assumptions: Assumptions,
 ) -> bytes:
-    """Create a polished Excel workbook with presentation-ready styling and charts."""
+    """Create an investor-ready workbook aligned to Key Metrics, Financials, and Key Analytics tabs."""
 
     wb = Workbook()
-    ws_exec = wb.active
-    ws_exec.title = "Executive Summary"
+
+    # ------------------------------------------------------------------
+    # Sheet 1: Key Metrics Dashboard
+    ws_metrics = wb.active
+    ws_metrics.title = "Key Metrics Dashboard"
     _excel_title(
-        ws_exec,
-        f"{assumptions.global_assumptions.project_name} | Investor Pack",
-        "Solar Farm Financial Model • Presentation-ready export",
+        ws_metrics,
+        f"{assumptions.global_assumptions.project_name} | Key Metrics Dashboard",
+        "KPIs, drivers, and trend visuals",
     )
 
     metrics_df = summary_tables["metrics"].copy()
-    metrics_df["metric"] = metrics_df["metric"].map(lambda m: MetricLabels.get(m, str(m).replace("_", " ").title()))
+    metrics_df["metric"] = metrics_df["metric"].map(
+        lambda m: MetricLabels.get(m, str(m).replace("_", " ").title())
+    )
     metrics_df = metrics_df.rename(columns={"metric": "Metric", "value": "Value"})
-    row = _write_styled_table(ws_exec, metrics_df, "Key Performance Indicators", start_row=4)
+    row = _write_styled_table(ws_metrics, metrics_df, "KPI Snapshot", start_row=4)
 
-    key_drivers_df = summary_tables["key_drivers"].copy()
-    row = _write_styled_table(ws_exec, key_drivers_df, "Key Drivers", start_row=row)
-
-    chart_start = row
     kpi_chart = BarChart()
-    kpi_chart.title = "KPI Snapshot"
+    kpi_chart.title = "KPI Comparison"
     kpi_chart.y_axis.title = "Value"
-    data = Reference(ws_exec, min_col=2, min_row=6, max_row=5 + len(metrics_df))
-    cats = Reference(ws_exec, min_col=1, min_row=6, max_row=5 + len(metrics_df))
-    kpi_chart.add_data(data, titles_from_data=False)
-    kpi_chart.set_categories(cats)
-    kpi_chart.width = 12
-    kpi_chart.height = 6
-    ws_exec.add_chart(kpi_chart, f"A{chart_start}")
+    kpi_chart.width = 11
+    kpi_chart.height = 5.5
+    kpi_chart.add_data(Reference(ws_metrics, min_col=2, min_row=5, max_row=5 + len(metrics_df)), titles_from_data=True)
+    kpi_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=6, max_row=5 + len(metrics_df)))
+    ws_metrics.add_chart(kpi_chart, f"A{row}")
 
-    ws_annual = wb.create_sheet("Annual Performance")
-    _excel_title(ws_annual, "Annual Financial Performance", "Revenue, profitability, and cash flow trends")
-    annual_df = outputs.annual_summary.reset_index()
-    annual_df = annual_df.rename(columns={annual_df.columns[0]: "Year"})
-    row = _write_styled_table(ws_annual, annual_df, "Annual Summary Table", start_row=4)
+    row += 15
+    key_drivers_df = summary_tables["key_drivers"].copy()
+    row = _write_styled_table(ws_metrics, key_drivers_df, "Key Drivers", start_row=row)
 
-    year_col = 1
-    revenue_col = annual_df.columns.get_loc("revenue_total") + 1
-    ebitda_col = annual_df.columns.get_loc("ebitda") + 1
-    fcff_col = annual_df.columns.get_loc("fcff") + 1
+    annual_core = outputs.annual_summary.reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})
+    row = _write_styled_table(
+        ws_metrics,
+        annual_core[["Year", "revenue_total", "ebitda", "fcff", "equity_cash_flow"]],
+        "Annual Performance Trend",
+        start_row=row,
+    )
     trend_chart = LineChart()
-    trend_chart.title = "Revenue, EBITDA, and FCFF Trend"
-    trend_chart.y_axis.title = "USD"
-    trend_chart.width = 14
+    trend_chart.title = "Revenue / EBITDA / FCFF"
+    trend_chart.width = 13
     trend_chart.height = 6
-    for col in (revenue_col, ebitda_col, fcff_col):
-        data = Reference(ws_annual, min_col=col, min_row=5, max_row=4 + len(annual_df))
-        trend_chart.add_data(data, titles_from_data=True)
-    trend_chart.set_categories(Reference(ws_annual, min_col=year_col, min_row=6, max_row=5 + len(annual_df)))
-    ws_annual.add_chart(trend_chart, f"A{row}")
+    for col in (2, 3, 4):
+        trend_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(annual_core) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    trend_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(annual_core), max_row=row - 2)
+    )
+    ws_metrics.add_chart(trend_chart, f"A{row}")
 
-    ws_cash = wb.create_sheet("Monthly Cash Flow")
-    _excel_title(ws_cash, "Monthly Cash Flow Detail", "FCFF, equity cash flow, and debt profile")
-    monthly_df = outputs.monthly_results.reset_index()[["month_start", "fcff", "equity_cash_flow", "debt_balance"]]
-    monthly_df = monthly_df.rename(
-        columns={
-            "month_start": "Month",
-            "fcff": "FCFF",
-            "equity_cash_flow": "Equity Cash Flow",
-            "debt_balance": "Debt Balance",
+    # ------------------------------------------------------------------
+    # Sheet 2: Financials
+    ws_fin = wb.create_sheet("Financials")
+    _excel_title(ws_fin, "Financials", "Financial Performance, Position, and Cash Flow Statement")
+
+    monthly = outputs.monthly_results
+    income = outputs.annual_summary[
+        ["revenue_total", "total_opex", "ebitda", "ebit", "tax_payment", "net_income"]
+    ].reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})
+    row = _write_styled_table(ws_fin, income, "Financial Performance", start_row=4)
+
+    income_chart = BarChart()
+    income_chart.title = "EBITDA and Net Income by Year"
+    income_chart.width = 12
+    income_chart.height = 5.5
+    for col in (4, 7):
+        income_chart.add_data(
+            Reference(ws_fin, min_col=col, min_row=5, max_row=5 + len(income)),
+            titles_from_data=True,
+        )
+    income_chart.set_categories(Reference(ws_fin, min_col=1, min_row=6, max_row=5 + len(income)))
+    ws_fin.add_chart(income_chart, f"A{row}")
+
+    opening_ppe = monthly.get("ppe_opening_balance", pd.Series(0.0, index=monthly.index)).cumsum()
+    net_ppe = (opening_ppe + monthly["capex"].cumsum() - monthly["depreciation"].cumsum()).clip(lower=0)
+    cash_balance = monthly["equity_cash_flow"].cumsum()
+    debt_balance = monthly.get("debt_balance", pd.Series(0.0, index=monthly.index))
+    total_assets = cash_balance + monthly.get("accounts_receivable", 0) + net_ppe
+    total_liabilities = debt_balance + monthly.get("accounts_payable", 0)
+    balance = pd.DataFrame(
+        {
+            "Cash": cash_balance,
+            "Net PP&E": net_ppe,
+            "Total Assets": total_assets,
+            "Debt Outstanding": debt_balance,
+            "Total Liabilities": total_liabilities,
+            "Equity": total_assets - total_liabilities,
+        },
+        index=monthly.index,
+    ).resample("YE").last()
+    balance.index = balance.index.year
+    balance_df = balance.reset_index().rename(columns={"index": "Year"})
+
+    row += 15
+    row = _write_styled_table(ws_fin, balance_df, "Financial Position", start_row=row)
+    position_chart = LineChart()
+    position_chart.title = "Assets vs Liabilities vs Equity"
+    position_chart.width = 12
+    position_chart.height = 5.5
+    for col in (4, 6, 7):
+        position_chart.add_data(
+            Reference(ws_fin, min_col=col, min_row=row - len(balance_df) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    position_chart.set_categories(
+        Reference(ws_fin, min_col=1, min_row=row - len(balance_df), max_row=row - 2)
+    )
+    ws_fin.add_chart(position_chart, f"A{row}")
+
+    ebitda = monthly["ebitda"].resample("YE").sum()
+    taxes = monthly["tax_payment"].resample("YE").sum()
+    interest = monthly["debt_interest"].resample("YE").sum()
+    wc = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("YE").sum()
+    investing_cf = (-monthly["capex"]).resample("YE").sum()
+    financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("YE").sum()
+    net_cf = ebitda - taxes - interest - wc + investing_cf + financing_cf
+    cash_flow_df = pd.DataFrame(
+        {
+            "Year": ebitda.index.year,
+            "Operating CF": ebitda - taxes - interest - wc,
+            "Investing CF": investing_cf,
+            "Financing CF": financing_cf,
+            "Net Change in Cash": net_cf,
         }
     )
-    row = _write_styled_table(ws_cash, monthly_df, "Monthly Cash Flow Table", start_row=4)
-    cash_chart = LineChart()
-    cash_chart.title = "Monthly FCFF vs Equity Cash Flow"
-    cash_chart.y_axis.title = "USD"
-    cash_chart.width = 14
-    cash_chart.height = 6
-    cash_chart.add_data(Reference(ws_cash, min_col=2, min_row=5, max_row=4 + len(monthly_df)), titles_from_data=True)
-    cash_chart.add_data(Reference(ws_cash, min_col=3, min_row=5, max_row=4 + len(monthly_df)), titles_from_data=True)
-    cash_chart.set_categories(Reference(ws_cash, min_col=1, min_row=6, max_row=4 + len(monthly_df)))
-    ws_cash.add_chart(cash_chart, f"A{row}")
 
-    ws_mix = wb.create_sheet("Revenue & Opex")
-    _excel_title(ws_mix, "Revenue and Cost Composition", "Annual revenue mix and operating cost structure")
-    revenue_mix = outputs.monthly_results.filter(like="revenue_").resample("YE").sum().reset_index()
-    revenue_date_col = revenue_mix.columns[0]
-    revenue_mix["Year"] = pd.to_datetime(revenue_mix[revenue_date_col]).dt.year
-    revenue_mix = revenue_mix.drop(columns=[revenue_date_col])
-    revenue_mix = revenue_mix[["Year"] + [col for col in revenue_mix.columns if col != "Year"]]
-    row = _write_styled_table(ws_mix, revenue_mix, "Annual Revenue Mix", start_row=4)
+    row += 15
+    row = _write_styled_table(ws_fin, cash_flow_df, "Cash Flow Statement", start_row=row)
+    cf_chart = LineChart()
+    cf_chart.title = "Operating / Investing / Financing Cash Flows"
+    cf_chart.width = 12
+    cf_chart.height = 5.5
+    for col in (2, 3, 4):
+        cf_chart.add_data(
+            Reference(ws_fin, min_col=col, min_row=row - len(cash_flow_df) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cf_chart.set_categories(
+        Reference(ws_fin, min_col=1, min_row=row - len(cash_flow_df), max_row=row - 2)
+    )
+    ws_fin.add_chart(cf_chart, f"A{row}")
 
-    rev_chart = BarChart()
-    rev_chart.type = "col"
-    rev_chart.grouping = "stacked"
-    rev_chart.title = "Revenue Composition by Year"
-    rev_chart.width = 14
-    rev_chart.height = 6
-    rev_chart.add_data(
-        Reference(ws_mix, min_col=2, min_row=5, max_col=revenue_mix.shape[1], max_row=5 + len(revenue_mix)),
+    # ------------------------------------------------------------------
+    # Sheet 3: Key Analytics
+    ws_analytics = wb.create_sheet("Key Analytics")
+    _excel_title(ws_analytics, "Key Analytics", "Sensitivity, scenario, simulation, and break-even diagnostics")
+
+    sensitivity_records: List[Dict[str, object]] = []
+    for variable_key in list(SENSITIVITY_OPTIONS.keys())[:4]:
+        label, apply_fn = SENSITIVITY_OPTIONS[variable_key]
+        for multiplier in (0.90, 1.00, 1.10):
+            metrics = outputs.metrics if math.isclose(multiplier, 1.0) else _simulate_metrics(
+                assumptions, lambda a, fn=apply_fn, m=multiplier: fn(a, m)
+            )
+            sensitivity_records.append(
+                {
+                    "Variable": label,
+                    "Multiplier": multiplier,
+                    "Project NPV": metrics.get("project_npv", float("nan")),
+                    "Project IRR": metrics.get("project_irr", float("nan")),
+                    "Payback (months)": metrics.get("project_payback_months", float("nan")),
+                }
+            )
+    sensitivity_df = pd.DataFrame(sensitivity_records)
+    row = _write_styled_table(ws_analytics, sensitivity_df, "Sensitivity Analysis (0.9x / 1.0x / 1.1x)", start_row=4)
+    sens_chart = BarChart()
+    sens_chart.title = "Sensitivity: Project NPV by Multiplier"
+    sens_chart.width = 12
+    sens_chart.height = 5.5
+    sens_chart.add_data(
+        Reference(ws_analytics, min_col=3, min_row=5, max_row=5 + len(sensitivity_df)),
         titles_from_data=True,
     )
-    rev_chart.set_categories(Reference(ws_mix, min_col=1, min_row=6, max_row=5 + len(revenue_mix)))
-    ws_mix.add_chart(rev_chart, f"A{row}")
+    sens_chart.set_categories(Reference(ws_analytics, min_col=2, min_row=6, max_row=5 + len(sensitivity_df)))
+    ws_analytics.add_chart(sens_chart, f"A{row}")
 
-    opex_mix = outputs.monthly_results.filter(like="opex_").resample("YE").sum().reset_index()
-    opex_date_col = opex_mix.columns[0]
-    opex_mix["Year"] = pd.to_datetime(opex_mix[opex_date_col]).dt.year
-    opex_mix = opex_mix.drop(columns=[opex_date_col])
-    opex_mix = opex_mix[["Year"] + [col for col in opex_mix.columns if col != "Year"]]
-    opex_start_row = row + 17
-    opex_row = _write_styled_table(ws_mix, opex_mix, "Annual Operating Expense Mix", start_row=opex_start_row)
-    opex_header_row = opex_start_row + 1
-    opex_data_start_row = opex_header_row + 1
-    opex_data_end_row = opex_data_start_row + len(opex_mix) - 1
-    opex_chart = BarChart()
-    opex_chart.type = "col"
-    opex_chart.grouping = "stacked"
-    opex_chart.title = "Opex Composition by Year"
-    opex_chart.width = 14
-    opex_chart.height = 6
-    opex_chart.add_data(
-        Reference(
-            ws_mix,
-            min_col=2,
-            min_row=opex_header_row,
-            max_col=opex_mix.shape[1],
-            max_row=opex_data_end_row,
-        ),
+    scenario_rows = [
+        {"Scenario": "Base", "Revenue Multiplier": 1.00, "Opex Multiplier": 1.00, "Capex Multiplier": 1.00},
+        {"Scenario": "Upside", "Revenue Multiplier": 1.05, "Opex Multiplier": 0.95, "Capex Multiplier": 0.95},
+        {"Scenario": "Downside", "Revenue Multiplier": 0.95, "Opex Multiplier": 1.05, "Capex Multiplier": 1.05},
+    ]
+    scenario_records: List[Dict[str, object]] = []
+    for row_cfg in scenario_rows:
+        if row_cfg["Scenario"] == "Base":
+            metrics = outputs.metrics
+        else:
+            metrics = _simulate_metrics(
+                assumptions,
+                lambda a, cfg=row_cfg: (
+                    _apply_revenue_multiplier(a, cfg["Revenue Multiplier"]),
+                    _apply_opex_multiplier(a, cfg["Opex Multiplier"]),
+                    _apply_capex_multiplier(a, cfg["Capex Multiplier"]),
+                ),
+            )
+        scenario_records.append(
+            {
+                **row_cfg,
+                "Project NPV": metrics.get("project_npv", float("nan")),
+                "Project IRR": metrics.get("project_irr", float("nan")),
+            }
+        )
+    scenario_df = pd.DataFrame(scenario_records)
+    row += 15
+    row = _write_styled_table(ws_analytics, scenario_df, "Scenario / IFs Analysis", start_row=row)
+    scen_chart = BarChart()
+    scen_chart.title = "Scenario Comparison: Project NPV"
+    scen_chart.width = 11
+    scen_chart.height = 5.5
+    scen_chart.add_data(
+        Reference(ws_analytics, min_col=5, min_row=row - len(scenario_df) - 1, max_row=row - 2),
         titles_from_data=True,
     )
-    opex_chart.set_categories(
-        Reference(ws_mix, min_col=1, min_row=opex_data_start_row, max_row=opex_data_end_row)
+    scen_chart.set_categories(
+        Reference(ws_analytics, min_col=1, min_row=row - len(scenario_df), max_row=row - 2)
     )
-    ws_mix.add_chart(opex_chart, f"A{opex_row}")
+    ws_analytics.add_chart(scen_chart, f"A{row}")
+
+    rng = np.random.default_rng(42)
+    mc_values = []
+    for _ in range(250):
+        revenue_mult = float(rng.normal(1.0, 0.05))
+        opex_mult = float(rng.normal(1.0, 0.04))
+        metrics = _simulate_metrics(
+            assumptions,
+            lambda a, rm=revenue_mult, om=opex_mult: (
+                _apply_revenue_multiplier(a, rm),
+                _apply_opex_multiplier(a, om),
+            ),
+        )
+        mc_values.append(
+            {
+                "Revenue Multiplier": revenue_mult,
+                "Opex Multiplier": opex_mult,
+                "Project NPV": metrics.get("project_npv", float("nan")),
+            }
+        )
+    mc_df = pd.DataFrame(mc_values)
+    mc_summary = mc_df["Project NPV"].agg(["mean", "std", "min", "max"]).to_frame(name="Value").reset_index()
+    mc_summary = mc_summary.rename(columns={"index": "Statistic"})
+    row += 15
+    row = _write_styled_table(ws_analytics, mc_summary, "Monte Carlo Summary (Project NPV)", start_row=row)
+    mc_chart = LineChart()
+    mc_chart.title = "Monte Carlo Project NPV Trend (sample order)"
+    mc_chart.width = 12
+    mc_chart.height = 5.5
+    mc_export = mc_df[["Project NPV"]].reset_index().rename(columns={"index": "Run"})
+    row = _write_styled_table(ws_analytics, mc_export.head(120), "Monte Carlo Sample Paths", start_row=row + 14)
+    mc_chart.add_data(
+        Reference(ws_analytics, min_col=2, min_row=row - 121, max_row=row - 2),
+        titles_from_data=True,
+    )
+    mc_chart.set_categories(Reference(ws_analytics, min_col=1, min_row=row - 120, max_row=row - 2))
+    ws_analytics.add_chart(mc_chart, f"A{row}")
+
+    be_df = pd.DataFrame(
+        {
+            "Month": monthly.index.astype(str),
+            "Equity Cash Flow": monthly["equity_cash_flow"].values,
+            "Cumulative Equity Cash Flow": monthly["equity_cash_flow"].cumsum().values,
+            "FCFF": monthly["fcff"].values,
+        }
+    )
+    row += 15
+    row = _write_styled_table(ws_analytics, be_df, "Break-Even & Payback", start_row=row)
+    be_chart = LineChart()
+    be_chart.title = "Cumulative Equity Cash Flow (Break-even Tracking)"
+    be_chart.width = 12
+    be_chart.height = 5.5
+    be_chart.add_data(
+        Reference(ws_analytics, min_col=3, min_row=row - len(be_df) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    be_chart.set_categories(
+        Reference(ws_analytics, min_col=1, min_row=row - len(be_df), max_row=row - 2)
+    )
+    ws_analytics.add_chart(be_chart, f"A{row}")
 
     buffer = io.BytesIO()
     wb.save(buffer)
