@@ -453,6 +453,77 @@ def _downloadable_excel(
     )
     ws_metrics.add_chart(trend_chart, f"A{row}")
 
+    row += 15
+    revenue_schedule = outputs.monthly_results.filter(like="revenue_").resample("YE").sum()
+    revenue_schedule.index = revenue_schedule.index.year
+    revenue_schedule = revenue_schedule.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_metrics, revenue_schedule, "Gross Revenue Schedule", start_row=row)
+    revenue_chart = BarChart()
+    revenue_chart.type = "col"
+    revenue_chart.grouping = "stacked"
+    revenue_chart.title = "Revenue Composition"
+    revenue_chart.width = 13
+    revenue_chart.height = 5.5
+    revenue_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(revenue_schedule) - 1, max_col=revenue_schedule.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    revenue_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(revenue_schedule), max_row=row - 2))
+    ws_metrics.add_chart(revenue_chart, f"A{row}")
+
+    row += 15
+    expense_schedule = outputs.monthly_results.filter(like="opex_").resample("YE").sum()
+    expense_schedule.index = expense_schedule.index.year
+    expense_schedule["total_opex"] = expense_schedule.sum(axis=1)
+    expense_schedule = expense_schedule.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_metrics, expense_schedule, "Operating Expense Schedule", start_row=row)
+    opex_chart = BarChart()
+    opex_chart.type = "col"
+    opex_chart.grouping = "stacked"
+    opex_chart.title = "Operating Cost Composition"
+    opex_chart.width = 13
+    opex_chart.height = 5.5
+    opex_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(expense_schedule) - 1, max_col=expense_schedule.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    opex_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(expense_schedule), max_row=row - 2))
+    ws_metrics.add_chart(opex_chart, f"A{row}")
+
+    row += 15
+    debt_schedule = outputs.annual_summary.reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})[
+        ["Year", "debt_draw", "debt_principal", "debt_interest"]
+    ]
+    row = _write_styled_table(ws_metrics, debt_schedule, "Debt Service Schedule", start_row=row)
+    debt_chart = LineChart()
+    debt_chart.title = "Debt Draw / Principal / Interest"
+    debt_chart.width = 13
+    debt_chart.height = 5.5
+    for col in (2, 3, 4):
+        debt_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(debt_schedule) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    debt_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(debt_schedule), max_row=row - 2))
+    ws_metrics.add_chart(debt_chart, f"A{row}")
+
+    row += 15
+    cash_schedule = outputs.annual_summary.reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})[
+        ["Year", "fcff", "equity_cash_flow", "capex", "delta_working_capital"]
+    ]
+    row = _write_styled_table(ws_metrics, cash_schedule, "Cash Flow Schedule", start_row=row)
+    cash_sched_chart = LineChart()
+    cash_sched_chart.title = "FCFF vs Equity Cash Flow"
+    cash_sched_chart.width = 13
+    cash_sched_chart.height = 5.5
+    for col in (2, 3):
+        cash_sched_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(cash_schedule) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cash_sched_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(cash_schedule), max_row=row - 2))
+    ws_metrics.add_chart(cash_sched_chart, f"A{row}")
+
     # ------------------------------------------------------------------
     # Sheet 2: Financials
     ws_fin = wb.create_sheet("Financials")
@@ -475,6 +546,43 @@ def _downloadable_excel(
         )
     income_chart.set_categories(Reference(ws_fin, min_col=1, min_row=6, max_row=5 + len(income)))
     ws_fin.add_chart(income_chart, f"A{row}")
+
+    row += 15
+    gross_revenue = outputs.monthly_results.filter(like="revenue_").resample("YE").sum()
+    gross_revenue.index = gross_revenue.index.year
+    gross_revenue = gross_revenue.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_fin, gross_revenue, "Gross Revenue Schedule", start_row=row)
+    gross_chart = BarChart()
+    gross_chart.type = "col"
+    gross_chart.grouping = "stacked"
+    gross_chart.title = "Gross Revenue Schedule"
+    gross_chart.width = 12
+    gross_chart.height = 5.5
+    gross_chart.add_data(
+        Reference(ws_fin, min_col=2, min_row=row - len(gross_revenue) - 1, max_col=gross_revenue.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    gross_chart.set_categories(Reference(ws_fin, min_col=1, min_row=row - len(gross_revenue), max_row=row - 2))
+    ws_fin.add_chart(gross_chart, f"A{row}")
+
+    row += 15
+    total_expense = outputs.monthly_results.filter(like="opex_").resample("YE").sum()
+    total_expense.index = total_expense.index.year
+    total_expense["Total"] = total_expense.sum(axis=1)
+    total_expense = total_expense.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_fin, total_expense, "Total Expense Schedule", start_row=row)
+    expense_chart = BarChart()
+    expense_chart.type = "col"
+    expense_chart.grouping = "stacked"
+    expense_chart.title = "Total Expense Composition"
+    expense_chart.width = 12
+    expense_chart.height = 5.5
+    expense_chart.add_data(
+        Reference(ws_fin, min_col=2, min_row=row - len(total_expense) - 1, max_col=total_expense.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    expense_chart.set_categories(Reference(ws_fin, min_col=1, min_row=row - len(total_expense), max_row=row - 2))
+    ws_fin.add_chart(expense_chart, f"A{row}")
 
     opening_ppe = monthly.get("ppe_opening_balance", pd.Series(0.0, index=monthly.index)).cumsum()
     net_ppe = (opening_ppe + monthly["capex"].cumsum() - monthly["depreciation"].cumsum()).clip(lower=0)
@@ -578,6 +686,46 @@ def _downloadable_excel(
     )
     sens_chart.set_categories(Reference(ws_analytics, min_col=2, min_row=6, max_row=5 + len(sensitivity_df)))
     ws_analytics.add_chart(sens_chart, f"A{row}")
+
+    goal_seek_records: List[Dict[str, object]] = []
+    target_npv = float(outputs.metrics.get("project_npv", float("nan"))) * 1.1
+    for variable_key, (label, apply_fn) in list(SENSITIVITY_OPTIONS.items())[:4]:
+        best_multiplier = 1.0
+        best_value = float(outputs.metrics.get("project_npv", float("nan")))
+        best_gap = abs(best_value - target_npv)
+        for multiplier in GOAL_SEEK_MULTIPLIERS:
+            metrics = outputs.metrics if math.isclose(multiplier, 1.0) else _simulate_metrics(
+                assumptions,
+                lambda a, fn=apply_fn, m=multiplier: fn(a, m),
+            )
+            candidate = float(metrics.get("project_npv", float("nan")))
+            gap = abs(candidate - target_npv)
+            if gap < best_gap:
+                best_gap = gap
+                best_multiplier = multiplier
+                best_value = candidate
+        goal_seek_records.append(
+            {
+                "Variable": label,
+                "Target Project NPV": target_npv,
+                "Recommended Multiplier": best_multiplier,
+                "Projected Project NPV": best_value,
+                "Gap vs Target": best_value - target_npv,
+            }
+        )
+    goal_seek_df = pd.DataFrame(goal_seek_records)
+    row += 15
+    row = _write_styled_table(ws_analytics, goal_seek_df, "Goal Seek Schedule", start_row=row)
+    goal_chart = BarChart()
+    goal_chart.title = "Goal Seek: Projected NPV by Variable"
+    goal_chart.width = 12
+    goal_chart.height = 5.5
+    goal_chart.add_data(
+        Reference(ws_analytics, min_col=4, min_row=row - len(goal_seek_df) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    goal_chart.set_categories(Reference(ws_analytics, min_col=1, min_row=row - len(goal_seek_df), max_row=row - 2))
+    ws_analytics.add_chart(goal_chart, f"A{row}")
 
     scenario_rows = [
         {"Scenario": "Base", "Revenue Multiplier": 1.00, "Opex Multiplier": 1.00, "Capex Multiplier": 1.00},
