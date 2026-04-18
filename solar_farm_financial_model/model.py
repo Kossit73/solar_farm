@@ -149,6 +149,15 @@ class SolarFarmFinancialModel:
         monthly["net_income"] = (
             monthly["ebit"] - monthly["debt_interest"] - monthly["tax_payment"]
         )
+        monthly["debt_service"] = monthly["debt_interest"] + monthly["debt_principal"]
+        monthly["cfads"] = (
+            monthly["ebitda"] - monthly["tax_payment"] - monthly["delta_working_capital"]
+        )
+        monthly["dscr"] = np.where(
+            monthly["debt_service"] > 0,
+            monthly["cfads"] / monthly["debt_service"],
+            np.nan,
+        )
 
         monthly["fcff"] = (
             monthly["ebit"] * (1 - monthly["tax_rate"])
@@ -232,6 +241,12 @@ class SolarFarmFinancialModel:
     def _compute_revenue(self, energy: pd.Series) -> pd.DataFrame:
         revenue_cfg = self.assumptions.revenue
         years = self._year_index()
+        total_share = revenue_cfg.ppa.share_of_output + revenue_cfg.merchant.share_of_output
+        if total_share > 1.0 + 1e-6:
+            raise ValueError(
+                "Revenue shares cannot exceed 100% of generation. "
+                f"Current total is {total_share:.2%}."
+            )
 
         ppa_rate = self._escalated_series(
             revenue_cfg.ppa.rate_curve.initial,
@@ -483,6 +498,15 @@ class SolarFarmFinancialModel:
         equity_cash_flow = monthly["equity_cash_flow"].values
         investor_cash_flow = monthly["investor_cash_flow"].values
         owner_cash_flow = monthly["owner_cash_flow"].values
+        debt_service = monthly["debt_service"].replace(0, np.nan)
+        dscr_series = (monthly["cfads"] / debt_service).replace([np.inf, -np.inf], np.nan).dropna()
+        capacity_mw = max(self.assumptions.energy.capacity_mw, 1e-6)
+        total_capex = float(monthly["capex"].sum())
+        total_opex = float(monthly["total_opex"].sum())
+        total_energy = float(monthly["energy_mwh"].sum())
+        negative_equity = -float(monthly.loc[monthly["equity_cash_flow"] < 0, "equity_cash_flow"].sum())
+        positive_equity = float(monthly.loc[monthly["equity_cash_flow"] > 0, "equity_cash_flow"].sum())
+        equity_multiple = positive_equity / negative_equity if negative_equity > 0 else float("nan")
 
         metrics = {
             "project_npv": npv(discount_rate, project_cash_flow),
@@ -491,6 +515,12 @@ class SolarFarmFinancialModel:
             "investor_irr": irr(investor_cash_flow) or float("nan"),
             "owner_irr": irr(owner_cash_flow) or float("nan"),
             "project_payback_months": payback_period(project_cash_flow) or float("nan"),
+            "min_dscr": float(dscr_series.min()) if not dscr_series.empty else float("nan"),
+            "avg_dscr": float(dscr_series.mean()) if not dscr_series.empty else float("nan"),
+            "capex_per_mw": total_capex / capacity_mw,
+            "opex_per_mwh": total_opex / total_energy if total_energy > 0 else float("nan"),
+            "lcoe_proxy_per_mwh": (total_capex + total_opex) / total_energy if total_energy > 0 else float("nan"),
+            "equity_multiple": equity_multiple,
         }
         return metrics
 
@@ -504,15 +534,28 @@ class SolarFarmFinancialModel:
                 "ebit": "sum",
                 "tax_payment": "sum",
                 "net_income": "sum",
+                "cfads": "sum",
                 "fcff": "sum",
                 "equity_cash_flow": "sum",
                 "capex": "sum",
                 "depreciation": "sum",
                 "debt_interest": "sum",
                 "debt_principal": "sum",
+                "debt_service": "sum",
                 "debt_draw": "sum",
                 "delta_working_capital": "sum",
+                "energy_mwh": "sum",
             }
+        )
+        annual["dscr"] = np.where(
+            annual["debt_service"] > 0,
+            annual["cfads"] / annual["debt_service"],
+            np.nan,
+        )
+        annual["ebitda_margin"] = np.where(
+            annual["revenue_total"] != 0,
+            annual["ebitda"] / annual["revenue_total"],
+            np.nan,
         )
         annual.index = annual.index.year
         return annual
