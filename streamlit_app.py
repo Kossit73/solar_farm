@@ -2388,16 +2388,6 @@ def _render_assumption_controls() -> tuple[
 
     st.subheader("Assumptions")
 
-    with st.container(border=True):
-        st.markdown("#### Upload assumption workbook")
-        uploaded_file = st.file_uploader(
-            "Drag and drop file here",
-            type=["xlsx", "xlsm", "xls"],
-            help="Optional Excel workbook matching the model template (max 200MB).",
-            key="uploaded_workbook",
-        )
-        st.caption("Limit 200MB per file · XLSX, XLSM, XLS")
-
     start_year, end_year = _render_projection_horizon_section()
     _render_label_value_table("Core Assumptions", "core_table", CORE_ASSUMPTION_DEFAULTS)
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
@@ -2424,7 +2414,7 @@ def _render_assumption_controls() -> tuple[
             """
         )
 
-    excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
+    excel_bytes = None
 
     project_name_override = (
         str(st.session_state.get("project_name_override", DEFAULT_PROJECT_NAME)).strip()
