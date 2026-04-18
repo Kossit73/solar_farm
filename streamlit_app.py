@@ -5051,6 +5051,7 @@ PAGE_OPTIONS = [
     "Key Metrics Dashboard",
     "Financials",
     "Key Analytics",
+    "AI Benchmark Assistant",
 ]
 
 tabs = st.tabs(PAGE_OPTIONS)
@@ -5180,7 +5181,7 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_monte_carlo(assumptions)
             st.divider()
             _render_break_even(outputs)
-            st.divider()
+        elif page_name == "AI Benchmark Assistant":
             _render_ai_benchmark_assistant(outputs, assumptions)
         else:
             st.info("Select a page tab to view analytics.")
