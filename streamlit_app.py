@@ -600,6 +600,18 @@ def _format_projection_caption(assumptions: Assumptions) -> str:
 
 
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarNav"],
+    [data-testid="collapsedControl"] {
+        display: none;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 GenericTableRow = Dict[str, object]
@@ -4240,7 +4252,3 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_monte_carlo(assumptions)
         else:
             _render_break_even(outputs)
-
-with st.sidebar:
-    st.info("Use the Input Landing Page tab to upload workbooks and adjust assumptions.")
-    st.success("Model run complete. Adjust the inputs to refresh outputs.")
