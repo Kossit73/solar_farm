@@ -12,6 +12,8 @@ def update_memory(memory: ConversationMemory, turn: AssistantTurn) -> Conversati
     memory.turns.append(turn)
     memory.summary["last_intent"] = turn.plan.intent
     memory.summary["last_question"] = turn.question
+    if isinstance(turn.plan.entities.get("metric"), str):
+        memory.summary["last_metric"] = turn.plan.entities["metric"]
     return memory
 
 def memory_to_prompt_context(memory: ConversationMemory) -> Dict[str, object]:
