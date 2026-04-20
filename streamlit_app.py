@@ -382,7 +382,9 @@ def _web_search_benchmarks(query: str, max_results: int = 4) -> List[Dict[str, s
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
-    return numerator / denominator if denominator not in (0.0, float("nan")) else float("nan")
+    if denominator is None or not np.isfinite(denominator) or abs(denominator) < 1e-12:
+        return float("nan")
+    return numerator / denominator
 
 
 def _internal_model_summary(outputs: ModelOutputs, assumptions: Assumptions) -> Dict[str, float]:
@@ -396,7 +398,11 @@ def _internal_model_summary(outputs: ModelOutputs, assumptions: Assumptions) -> 
     net_income = float(latest_year.get("net_income", float("nan")))
     debt_balance = float(monthly.get("debt_balance", pd.Series([0.0])).iloc[-1])
     annual_debt_service = float(latest_year.get("debt_interest", 0.0) + latest_year.get("debt_principal", 0.0))
-    dscr = _safe_ratio(float(latest_year.get("ebitda", float("nan"))), annual_debt_service) if annual_debt_service else float("nan")
+    if "dscr" in monthly.columns:
+        dscr_series = monthly["dscr"].replace([np.inf, -np.inf], np.nan).dropna()
+        dscr = float(dscr_series.mean()) if not dscr_series.empty else float("nan")
+    else:
+        dscr = _safe_ratio(float(latest_year.get("cfads", float("nan"))), annual_debt_service) if annual_debt_service else float("nan")
 
     annual_energy = float(monthly["energy_mwh"].sum()) / max(1.0, assumptions.global_assumptions.forecast_months / 12.0)
     total_capex = float(sum(item.amount for item in assumptions.capex_items))

@@ -199,7 +199,12 @@ class SolarFarmFinancialModel:
         distribution = self.assumptions.global_assumptions.distribution.normalized()
         monthly["investor_cash_flow"] = monthly["equity_cash_flow"] * distribution.investor_share
         monthly["owner_cash_flow"] = monthly["equity_cash_flow"] * distribution.owner_share
-        monthly["sources_total"] = monthly["debt_draw"] + monthly["equity_contribution"] + monthly["revenue_total"]
+        monthly["sources_total"] = (
+            monthly["debt_draw"]
+            + monthly["equity_contribution"]
+            + monthly["revenue_total"]
+            + monthly["itc_benefit"]
+        )
         monthly["uses_total"] = (
             monthly["capex"]
             + monthly["total_opex"]
@@ -207,6 +212,7 @@ class SolarFarmFinancialModel:
             + monthly["debt_principal"]
             + monthly["tax_payment"]
             + monthly["dsra_change"]
+            + monthly["delta_working_capital"]
         )
         monthly["sources_uses_gap"] = monthly["sources_total"] - monthly["uses_total"]
 
