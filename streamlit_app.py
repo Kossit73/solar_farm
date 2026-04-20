@@ -2575,6 +2575,24 @@ def _render_projection_horizon_section() -> Tuple[int, int]:
     return start_year, int(end_year)
 
 
+PANEL_UNIT_COST_DEFAULT = 250.0
+
+
+def _solar_panels_amount(rows: List[Dict[str, object]]) -> float:
+    """Return the amount of the Solar Panels CAPEX line from initial investment rows."""
+    for row in rows:
+        if str(row.get("name", "")).strip().lower() == "solar panels":
+            return float(row.get("amount", 0.0))
+    return 0.0
+
+
+def _derived_panel_count(solar_panels_amount: float, panel_unit_cost: float) -> float:
+    """Derive panel count from CAPEX and unit cost."""
+    if panel_unit_cost <= 0:
+        return 0.0
+    return max(0.0, solar_panels_amount) / panel_unit_cost
+
+
 def _render_initial_investment_section() -> None:
     _ensure_initial_investment_state()
     state_key = "initial_investment"
@@ -2719,21 +2737,17 @@ def _render_initial_investment_section() -> None:
     total_equity = sum(float(row.get("amount", 0.0)) for row in st.session_state[state_key])
     st.markdown(f"**Total Equity:** ${total_equity:,.2f}")
 
-    solar_panels_amount = 0.0
-    for row in st.session_state[state_key]:
-        if str(row.get("name", "")).strip().lower() == "solar panels":
-            solar_panels_amount = float(row.get("amount", 0.0))
-            break
+    solar_panels_amount = _solar_panels_amount(st.session_state[state_key])
 
     panel_unit_cost = st.number_input(
         "Panel Unit Cost ($/panel)",
         min_value=0.0,
-        value=float(st.session_state.get("panel_unit_cost_input", 250.0)),
+        value=float(st.session_state.get("panel_unit_cost_input", PANEL_UNIT_COST_DEFAULT)),
         step=5.0,
         key="panel_unit_cost_input",
         help="Used to derive panel count as Solar Panels amount ÷ panel unit cost.",
     )
-    derived_panel_count = solar_panels_amount / panel_unit_cost if panel_unit_cost > 0 else 0.0
+    derived_panel_count = _derived_panel_count(solar_panels_amount, panel_unit_cost)
     st.caption(
         f"Derived Panel Count = Solar Panels (${solar_panels_amount:,.2f}) ÷ "
         f"Unit Cost (${panel_unit_cost:,.2f}) = **{derived_panel_count:,.0f} panels**"
@@ -3495,13 +3509,9 @@ def _render_assumption_controls() -> tuple[
     )
 
     initial_investment_rows = copy.deepcopy(st.session_state.get("initial_investment", []))
-    solar_panels_amount = 0.0
-    for row in initial_investment_rows:
-        if str(row.get("name", "")).strip().lower() == "solar panels":
-            solar_panels_amount = float(row.get("amount", 0.0))
-            break
-    panel_unit_cost_input = float(st.session_state.get("panel_unit_cost_input", 250.0))
-    derived_panel_count = solar_panels_amount / panel_unit_cost_input if panel_unit_cost_input > 0 else 0.0
+    solar_panels_amount = _solar_panels_amount(initial_investment_rows)
+    panel_unit_cost_input = float(st.session_state.get("panel_unit_cost_input", PANEL_UNIT_COST_DEFAULT))
+    derived_panel_count = _derived_panel_count(solar_panels_amount, panel_unit_cost_input)
 
     overrides: Dict[str, float | bool | str] = {
         "discount_rate": float(_get_row_value("core_table", "discount_rate", 0.10, float)),

@@ -260,11 +260,7 @@ class SolarFarmFinancialModel:
         panel_unit_cost = float(getattr(energy_cfg, "panel_unit_cost", 0.0))
         dc_ac_ratio = max(1e-6, float(getattr(energy_cfg, "dc_ac_ratio", 1.25)))
 
-        solar_panels_item = None
-        for item in self.assumptions.capex_items:
-            if str(getattr(item, "name", "")).strip().lower() == "solar panels":
-                solar_panels_item = item
-                break
+        solar_panels_item = self._find_capex_item("solar panels")
 
         # Reverse direction support: if panel CAPEX and unit cost are known, derive panel count.
         if panel_count <= 0 and panel_unit_cost > 0 and solar_panels_item is not None:
@@ -279,6 +275,14 @@ class SolarFarmFinancialModel:
         # Forward direction: panels -> panel CAPEX line item.
         if panel_count > 0 and panel_unit_cost > 0 and solar_panels_item is not None:
             solar_panels_item.amount = panel_count * panel_unit_cost
+
+    def _find_capex_item(self, item_name: str):
+        """Return the first CAPEX item matching ``item_name`` (case-insensitive)."""
+        target = str(item_name).strip().lower()
+        for item in self.assumptions.capex_items:
+            if str(getattr(item, "name", "")).strip().lower() == target:
+                return item
+        return None
 
     # ------------------------------------------------------------------
     # Timeline helpers
