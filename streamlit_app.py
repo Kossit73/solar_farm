@@ -1769,28 +1769,12 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "step": 24.0,
     },
     {
-        "id": "panel_count",
-        "label": "Panel Count",
-        "value": 0.0,
-        "input_type": "number",
-        "min": 0.0,
-        "step": 100.0,
-    },
-    {
         "id": "panel_watt_dc",
         "label": "Panel Watt (DC)",
         "value": 550.0,
         "input_type": "number",
         "min": 0.0,
         "step": 10.0,
-    },
-    {
-        "id": "panel_unit_cost",
-        "label": "Panel Unit Cost ($/panel)",
-        "value": 250.0,
-        "input_type": "number",
-        "min": 0.0,
-        "step": 5.0,
     },
     {
         "id": "dc_ac_ratio",
@@ -2735,6 +2719,26 @@ def _render_initial_investment_section() -> None:
     total_equity = sum(float(row.get("amount", 0.0)) for row in st.session_state[state_key])
     st.markdown(f"**Total Equity:** ${total_equity:,.2f}")
 
+    solar_panels_amount = 0.0
+    for row in st.session_state[state_key]:
+        if str(row.get("name", "")).strip().lower() == "solar panels":
+            solar_panels_amount = float(row.get("amount", 0.0))
+            break
+
+    panel_unit_cost = st.number_input(
+        "Panel Unit Cost ($/panel)",
+        min_value=0.0,
+        value=float(st.session_state.get("panel_unit_cost_input", 250.0)),
+        step=5.0,
+        key="panel_unit_cost_input",
+        help="Used to derive panel count as Solar Panels amount ÷ panel unit cost.",
+    )
+    derived_panel_count = solar_panels_amount / panel_unit_cost if panel_unit_cost > 0 else 0.0
+    st.caption(
+        f"Derived Panel Count = Solar Panels (${solar_panels_amount:,.2f}) ÷ "
+        f"Unit Cost (${panel_unit_cost:,.2f}) = **{derived_panel_count:,.0f} panels**"
+    )
+
     st.caption(
         "Depreciation schedules are generated automatically from these entries; "
         "a separate fixed asset editor is no longer required."
@@ -3490,6 +3494,15 @@ def _render_assumption_controls() -> tuple[
         or DEFAULT_PROJECT_NAME
     )
 
+    initial_investment_rows = copy.deepcopy(st.session_state.get("initial_investment", []))
+    solar_panels_amount = 0.0
+    for row in initial_investment_rows:
+        if str(row.get("name", "")).strip().lower() == "solar panels":
+            solar_panels_amount = float(row.get("amount", 0.0))
+            break
+    panel_unit_cost_input = float(st.session_state.get("panel_unit_cost_input", 250.0))
+    derived_panel_count = solar_panels_amount / panel_unit_cost_input if panel_unit_cost_input > 0 else 0.0
+
     overrides: Dict[str, float | bool | str] = {
         "discount_rate": float(_get_row_value("core_table", "discount_rate", 0.10, float)),
         "exit_multiple": float(_get_row_value("core_table", "exit_multiple", 5.0, float)),
@@ -3506,9 +3519,9 @@ def _render_assumption_controls() -> tuple[
         "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
         "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
         "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
-        "panel_count": float(_get_row_value("energy_table", "panel_count", 0.0, float)),
+        "panel_count": float(derived_panel_count),
         "panel_watt_dc": float(_get_row_value("energy_table", "panel_watt_dc", 550.0, float)),
-        "panel_unit_cost": float(_get_row_value("energy_table", "panel_unit_cost", 250.0, float)),
+        "panel_unit_cost": float(panel_unit_cost_input),
         "dc_ac_ratio": float(_get_row_value("energy_table", "dc_ac_ratio", 1.25, float)),
         "annual_production_growth_rate": float(
             _get_row_value("energy_table", "annual_production_growth_rate", 0.0, float)
@@ -3524,8 +3537,6 @@ def _render_assumption_controls() -> tuple[
         "start_year": int(start_year),
         "end_year": int(end_year),
     }
-
-    initial_investment_rows = copy.deepcopy(st.session_state.get("initial_investment", []))
 
     labour_rows = [
         {
