@@ -119,6 +119,9 @@ class SolarFarmFinancialModel:
         monthly.index.name = "month_start"
 
         energy = self._compute_energy_profile()
+        curtailment_rate = max(0.0, min(0.95, float(getattr(self.assumptions.energy, "curtailment_rate", 0.0))))
+        if curtailment_rate > 0:
+            energy = energy * (1 - curtailment_rate)
         revenue = self._compute_revenue(energy)
         fixed_opex = self._compute_fixed_opex(energy)
         variable_opex = self._compute_variable_opex(energy)
@@ -131,7 +134,7 @@ class SolarFarmFinancialModel:
         monthly = monthly.join(fixed_opex)
         monthly = monthly.join(variable_opex)
         monthly["total_opex"] = monthly.filter(like="opex_").sum(axis=1)
-        monthly["capex"] = capex
+        monthly["capex"] = capex + self._compute_lifecycle_capex()
         monthly["depreciation"] = depreciation
         monthly["ppe_opening_balance"] = opening_ppe
         monthly = monthly.join(debt_schedule)
@@ -144,7 +147,15 @@ class SolarFarmFinancialModel:
         working_capital = self._compute_working_capital(monthly)
         monthly = monthly.join(working_capital)
 
-        monthly["taxable_income"] = (monthly["ebit"] - monthly["debt_interest"]).clip(lower=0)
+        bonus_dep_rate = max(
+            0.0,
+            min(1.0, float(getattr(self.assumptions, "bonus_depreciation_rate", 0.0))),
+        )
+        bonus_depreciation = monthly["capex"] * bonus_dep_rate
+        monthly["bonus_depreciation"] = bonus_depreciation
+        monthly["taxable_income"] = (
+            monthly["ebit"] - monthly["debt_interest"] - monthly["bonus_depreciation"]
+        ).clip(lower=0)
         monthly["tax_payment"] = monthly["taxable_income"] * monthly["tax_rate"]
         monthly["net_income"] = (
             monthly["ebit"] - monthly["debt_interest"] - monthly["tax_payment"]
@@ -171,7 +182,14 @@ class SolarFarmFinancialModel:
             - monthly["debt_principal"]
             + monthly["debt_draw"]
         )
-        monthly["equity_cash_flow"] = monthly["debt_free_cash_flow"]
+        monthly["itc_benefit"] = self._compute_itc_benefit(monthly["capex"])
+        monthly["debt_free_cash_flow"] = monthly["debt_free_cash_flow"] + monthly["itc_benefit"]
+        monthly["dsra_required"] = self._compute_dsra_required(monthly["debt_service"])
+        monthly["dsra_change"] = monthly["dsra_required"].diff().fillna(monthly["dsra_required"])
+        monthly["cash_after_dsra"] = monthly["debt_free_cash_flow"] - monthly["dsra_change"]
+        monthly["equity_contribution"] = (monthly["capex"] - monthly["debt_draw"]).clip(lower=0)
+        monthly["equity_distribution"] = monthly["cash_after_dsra"].clip(lower=0)
+        monthly["equity_cash_flow"] = -monthly["equity_contribution"] + monthly["equity_distribution"]
 
         terminal_cash = self._compute_terminal_value(monthly)
         if terminal_cash is not None:
@@ -181,6 +199,16 @@ class SolarFarmFinancialModel:
         distribution = self.assumptions.global_assumptions.distribution.normalized()
         monthly["investor_cash_flow"] = monthly["equity_cash_flow"] * distribution.investor_share
         monthly["owner_cash_flow"] = monthly["equity_cash_flow"] * distribution.owner_share
+        monthly["sources_total"] = monthly["debt_draw"] + monthly["equity_contribution"] + monthly["revenue_total"]
+        monthly["uses_total"] = (
+            monthly["capex"]
+            + monthly["total_opex"]
+            + monthly["debt_interest"]
+            + monthly["debt_principal"]
+            + monthly["tax_payment"]
+            + monthly["dsra_change"]
+        )
+        monthly["sources_uses_gap"] = monthly["sources_total"] - monthly["uses_total"]
 
         metrics = self._compute_metrics(monthly)
         annual_summary = self._build_annual_summary(monthly)
@@ -480,9 +508,19 @@ class SolarFarmFinancialModel:
         assumptions = self.assumptions.global_assumptions
         if not assumptions.include_terminal_value:
             return None
-
+        method = str(getattr(assumptions, "terminal_method", "multiple")).lower()
         trailing_ebitda = monthly["ebitda"].iloc[-12:].mean() if len(monthly) >= 12 else monthly["ebitda"].iloc[-1]
-        enterprise_value = trailing_ebitda * assumptions.exit_multiple
+
+        if method == "gordon":
+            growth = float(getattr(self.assumptions, "terminal_growth_rate", 0.0))
+            discount = assumptions.discount_rate
+            if discount <= growth:
+                enterprise_value = trailing_ebitda * assumptions.exit_multiple
+            else:
+                terminal_fcf = monthly["fcff"].iloc[-12:].sum() if len(monthly) >= 12 else monthly["fcff"].iloc[-1] * 12
+                enterprise_value = terminal_fcf * (1 + growth) / (discount - growth)
+        else:
+            enterprise_value = trailing_ebitda * assumptions.exit_multiple
 
         tax_rate = assumptions.tax.capital_gains_tax_rate
         net_proceeds = enterprise_value * (1 - tax_rate)
@@ -507,6 +545,8 @@ class SolarFarmFinancialModel:
         negative_equity = -float(monthly.loc[monthly["equity_cash_flow"] < 0, "equity_cash_flow"].sum())
         positive_equity = float(monthly.loc[monthly["equity_cash_flow"] > 0, "equity_cash_flow"].sum())
         equity_multiple = positive_equity / negative_equity if negative_equity > 0 else float("nan")
+        llcr, plcr = self._compute_coverage_ratios(monthly, discount_rate)
+        downside_npvs = self._compute_downside_npv_distribution(monthly, discount_rate)
 
         metrics = {
             "project_npv": npv(discount_rate, project_cash_flow),
@@ -521,6 +561,11 @@ class SolarFarmFinancialModel:
             "opex_per_mwh": total_opex / total_energy if total_energy > 0 else float("nan"),
             "lcoe_proxy_per_mwh": (total_capex + total_opex) / total_energy if total_energy > 0 else float("nan"),
             "equity_multiple": equity_multiple,
+            "llcr_proxy": llcr,
+            "plcr_proxy": plcr,
+            "downside_npv_p10": float(np.percentile(downside_npvs, 10)) if len(downside_npvs) else float("nan"),
+            "downside_npv_p50": float(np.percentile(downside_npvs, 50)) if len(downside_npvs) else float("nan"),
+            "downside_npv_p90": float(np.percentile(downside_npvs, 90)) if len(downside_npvs) else float("nan"),
         }
         return metrics
 
@@ -545,6 +590,13 @@ class SolarFarmFinancialModel:
                 "debt_draw": "sum",
                 "delta_working_capital": "sum",
                 "energy_mwh": "sum",
+                "itc_benefit": "sum",
+                "equity_contribution": "sum",
+                "equity_distribution": "sum",
+                "dsra_change": "sum",
+                "sources_total": "sum",
+                "uses_total": "sum",
+                "sources_uses_gap": "sum",
             }
         )
         annual["dscr"] = np.where(
@@ -559,3 +611,72 @@ class SolarFarmFinancialModel:
         )
         annual.index = annual.index.year
         return annual
+
+    def _compute_itc_benefit(self, capex: pd.Series) -> pd.Series:
+        itc_rate = max(0.0, min(1.0, float(getattr(self.assumptions, "itc_rate", 0.0))))
+        itc_series = pd.Series(0.0, index=self._timeline)
+        if itc_rate <= 0 or capex.sum() <= 0:
+            return itc_series
+        grant_month = int(getattr(self.assumptions, "itc_realization_month", 13))
+        idx = max(0, min(len(itc_series) - 1, grant_month - 1))
+        itc_series.iloc[idx] = float(capex.sum()) * itc_rate
+        return itc_series
+
+    def _compute_lifecycle_capex(self) -> pd.Series:
+        lifecycle = pd.Series(0.0, index=self._timeline)
+        replacement_year = int(getattr(self.assumptions, "lifecycle_replacement_year", 0))
+        replacement_fraction = max(0.0, float(getattr(self.assumptions, "lifecycle_replacement_fraction", 0.0)))
+        if replacement_year <= 0 or replacement_fraction <= 0:
+            return lifecycle
+        total_base_capex = sum(item.amount for item in self.assumptions.capex_items)
+        replacement_month = replacement_year * 12
+        idx = replacement_month - 1
+        if 0 <= idx < len(lifecycle):
+            lifecycle.iloc[idx] = total_base_capex * replacement_fraction
+        return lifecycle
+
+    def _compute_dsra_required(self, debt_service: pd.Series, reserve_months: int = 6) -> pd.Series:
+        arr = debt_service.to_numpy(dtype=float)
+        req = np.zeros_like(arr)
+        n = len(arr)
+        for i in range(n):
+            end = min(n, i + reserve_months)
+            req[i] = float(arr[i:end].mean()) if end > i else 0.0
+        return pd.Series(req, index=self._timeline)
+
+    def _compute_coverage_ratios(self, monthly: pd.DataFrame, discount_rate: float) -> Tuple[float, float]:
+        periodic = (1 + discount_rate) ** (1 / 12) - 1
+        cfads = monthly["cfads"].fillna(0.0).to_numpy()
+        debt_balance = monthly["debt_balance"].fillna(0.0).to_numpy()
+        debt_service = monthly["debt_service"].fillna(0.0).to_numpy()
+        max_debt = float(np.max(debt_balance)) if debt_balance.size else 0.0
+        if max_debt <= 0:
+            return float("nan"), float("nan")
+        loan_mask = debt_service > 0
+        cfads_loan = cfads[loan_mask] if loan_mask.any() else np.array([])
+        if cfads_loan.size == 0:
+            return float("nan"), float("nan")
+        llcr = npv(periodic, cfads_loan) / max_debt
+        plcr = npv(periodic, cfads) / max_debt
+        return float(llcr), float(plcr)
+
+    def _compute_downside_npv_distribution(self, monthly: pd.DataFrame, discount_rate: float) -> List[float]:
+        rng = np.random.default_rng(42)
+        samples: List[float] = []
+        for _ in range(120):
+            revenue_mult = float(rng.normal(0.95, 0.05))
+            opex_mult = float(rng.normal(1.05, 0.05))
+            capex_mult = float(rng.normal(1.05, 0.07))
+            stressed_ebit = (
+                monthly["revenue_total"] * revenue_mult
+                - monthly["total_opex"] * opex_mult
+                - monthly["depreciation"]
+            )
+            stressed_fcff = (
+                stressed_ebit * (1 - monthly["tax_rate"])
+                + monthly["depreciation"]
+                - monthly["capex"] * capex_mult
+                - monthly["delta_working_capital"]
+            )
+            samples.append(float(npv(discount_rate, stressed_fcff.to_numpy())))
+        return samples
