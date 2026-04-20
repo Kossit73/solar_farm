@@ -34,7 +34,7 @@ class EnergyAssumptions:
     monthly_min_mwh: float = 0.0
     panel_count: float = 0.0
     panel_watt_dc: float = 0.0
-    panel_unit_cost: float = 0.0
+    panel_unit_cost: float = 250.0
     dc_ac_ratio: float = 1.25
     seasonality: Sequence[float] = field(
         default_factory=lambda: [

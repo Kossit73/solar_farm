@@ -1787,7 +1787,7 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
     {
         "id": "panel_unit_cost",
         "label": "Panel Unit Cost ($/panel)",
-        "value": 0.0,
+        "value": 250.0,
         "input_type": "number",
         "min": 0.0,
         "step": 5.0,
@@ -3508,7 +3508,7 @@ def _render_assumption_controls() -> tuple[
         "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
         "panel_count": float(_get_row_value("energy_table", "panel_count", 0.0, float)),
         "panel_watt_dc": float(_get_row_value("energy_table", "panel_watt_dc", 550.0, float)),
-        "panel_unit_cost": float(_get_row_value("energy_table", "panel_unit_cost", 0.0, float)),
+        "panel_unit_cost": float(_get_row_value("energy_table", "panel_unit_cost", 250.0, float)),
         "dc_ac_ratio": float(_get_row_value("energy_table", "dc_ac_ratio", 1.25, float)),
         "annual_production_growth_rate": float(
             _get_row_value("energy_table", "annual_production_growth_rate", 0.0, float)
