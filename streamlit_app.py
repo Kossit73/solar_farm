@@ -24,6 +24,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from solar_farm_financial_model.data_loader import load_assumptions
+from solar_farm_financial_model.ai import ConversationMemory, run_assistant_turn
 from solar_farm_financial_model.model import (
     ModelOutputs,
     SolarFarmFinancialModel,
@@ -511,6 +512,8 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
 
     if "ai_chat_history" not in st.session_state:
         st.session_state["ai_chat_history"] = []
+    if "ai_memory" not in st.session_state or not isinstance(st.session_state["ai_memory"], ConversationMemory):
+        st.session_state["ai_memory"] = ConversationMemory()
 
     model_data = _internal_model_summary(outputs, assumptions)
     with st.expander("Current model context used by chatbot", expanded=False):
@@ -529,28 +532,19 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
     if not prompt:
         return
 
-    question_type = _classify_question_type(prompt)
-    query = QUESTION_TYPE_QUERIES.get(question_type, QUESTION_TYPE_QUERIES["valuation"])
-    try:
-        sources = _web_search_benchmarks(query, max_results=5)
-    except Exception:
-        sources = []
-    benchmark_range = BENCHMARK_REFERENCE_RANGES.get(question_type, {})
-    answer = _build_structured_ai_response(
-        prompt,
-        model_data,
-        benchmark_range,
-        sources,
-        question_type,
-        st.session_state["ai_chat_history"],
+    turn, memory = run_assistant_turn(
+        question=prompt,
+        outputs=outputs,
+        assumptions=assumptions,
+        memory=st.session_state["ai_memory"],
     )
-
-    st.session_state["ai_chat_history"].append({"question": prompt, "answer": answer})
+    st.session_state["ai_memory"] = memory
+    st.session_state["ai_chat_history"].append({"question": prompt, "answer": turn.answer_markdown})
 
     with st.chat_message("user"):
         st.write(prompt)
     with st.chat_message("assistant"):
-        st.markdown(answer)
+        st.markdown(turn.answer_markdown)
 
 
 def _excel_title(ws, title: str, subtitle: str) -> None:
