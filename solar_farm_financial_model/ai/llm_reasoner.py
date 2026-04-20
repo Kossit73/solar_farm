@@ -82,6 +82,7 @@ def generate_reasoned_answer(
 ) -> str:
     """Generate reasoning-first answer with optional web_search tool access."""
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model_name = os.environ.get("OPENAI_MODEL", "gpt-5")
 
     source_md = "\n".join(f"- {s.title}: {s.url}" for s in preloaded_sources) or "- None preloaded"
     user_context = (
@@ -96,7 +97,7 @@ def generate_reasoned_answer(
     )
 
     response = client.responses.create(
-        model="gpt-5",
+        model=model_name,
         reasoning={"effort": "medium"},
         tools=[{"type": "web_search"}],
         input=[

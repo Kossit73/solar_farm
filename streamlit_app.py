@@ -65,6 +65,31 @@ def _configure_openai_api_key() -> bool:
     return False
 
 
+def _render_llm_settings() -> None:
+    """Allow users to insert API key and choose model at runtime."""
+    with st.expander("LLM Settings", expanded=False):
+        api_key_value = st.text_input(
+            "OpenAI API Key",
+            value="",
+            type="password",
+            placeholder="sk-...",
+            help="Entered key is stored in current session environment only.",
+        )
+        if api_key_value:
+            os.environ["OPENAI_API_KEY"] = api_key_value.strip()
+            st.success("OpenAI API key applied for this session.")
+
+        default_model = os.environ.get("OPENAI_MODEL", "gpt-5")
+        model_choice = st.selectbox(
+            "LLM Model",
+            options=["gpt-5", "gpt-5-mini"],
+            index=0 if default_model == "gpt-5" else 1,
+            help="Model used by the AI Reasoning Chatbot when API key is available.",
+        )
+        os.environ["OPENAI_MODEL"] = model_choice
+        st.caption(f"Current LLM model: `{model_choice}`")
+
+
 @st.cache_data(show_spinner=False)
 def _run_model(
     excel_bytes: bytes | None,
@@ -521,6 +546,7 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
     st.caption(
         "Model-grounded and benchmark-aware copilot for valuation, profitability, leverage, pricing, efficiency, and risk."
     )
+    _render_llm_settings()
     if os.environ.get("OPENAI_API_KEY"):
         st.success("GPT-5 + web_search path is enabled (OPENAI_API_KEY detected).")
     else:
