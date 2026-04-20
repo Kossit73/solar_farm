@@ -515,13 +515,6 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
     if "ai_memory" not in st.session_state or not isinstance(st.session_state["ai_memory"], ConversationMemory):
         st.session_state["ai_memory"] = ConversationMemory()
 
-    model_data = _internal_model_summary(outputs, assumptions)
-    with st.expander("Current model context used by chatbot", expanded=False):
-        context_df = pd.DataFrame(
-            [{"metric": k, "value": v} for k, v in model_data.items()]
-        )
-        st.dataframe(context_df, use_container_width=True)
-
     for item in st.session_state["ai_chat_history"]:
         with st.chat_message("user"):
             st.write(item["question"])

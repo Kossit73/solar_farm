@@ -18,19 +18,50 @@ def compose_markdown_answer(
     packet: EvidencePacket,
     sources: List[SourceRef],
 ) -> str:
-    """Compose structured response with model-first reasoning."""
-    direct = f"Based on the current run, this is primarily a **{plan.intent}** question."
+    """Compose structured response with model-first reasoning in prose form."""
+    npv = packet.internal_facts.get("project_npv")
+    project_irr = packet.internal_facts.get("project_irr")
+    equity_irr = packet.internal_facts.get("equity_irr")
+    avg_dscr = packet.internal_facts.get("avg_dscr")
+    min_dscr = packet.internal_facts.get("min_dscr")
+    rev_delta = packet.driver_breakdown.get("revenue_delta_latest_vs_first")
+    ebitda_delta = packet.driver_breakdown.get("ebitda_delta_latest_vs_first")
 
-    internal_lines = [f"- {k}: `{v}`" for k, v in packet.internal_facts.items()]
-    driver_lines = [f"- {k}: `{v}`" for k, v in packet.driver_breakdown.items()]
-    sources_lines = [f"- {s.title}: {s.url}" for s in sources]
+    direct = (
+        f"This question is best handled as a **{plan.intent}** analysis. "
+        "The answer below is grounded in the current model run first, then augmented "
+        "with external context only when useful."
+    )
 
+    internal_lines = []
+    if npv is not None:
+        internal_lines.append(f"- Project NPV is approximately `{npv:,.0f}`.")
+    if project_irr is not None:
+        internal_lines.append(f"- Project IRR is approximately `{project_irr:.2%}`.")
+    if equity_irr is not None:
+        internal_lines.append(f"- Equity IRR is approximately `{equity_irr:.2%}`.")
+    if avg_dscr is not None:
+        internal_lines.append(f"- Average DSCR in the modeled horizon is around `{avg_dscr:.2f}x`.")
+    if min_dscr is not None:
+        internal_lines.append(f"- Minimum DSCR observed is around `{min_dscr:.2f}x`.")
     if not internal_lines:
-        internal_lines = ["- No internal model facts were extracted."]
+        internal_lines = ["- No internal model facts were extracted for this specific query."]
+
+    driver_lines = []
+    if rev_delta is not None:
+        driver_lines.append(
+            f"- Revenue change from the first to latest modeled year is approximately `{rev_delta:,.0f}`."
+        )
+    if ebitda_delta is not None:
+        driver_lines.append(
+            f"- EBITDA change from the first to latest modeled year is approximately `{ebitda_delta:,.0f}`."
+        )
     if not driver_lines:
-        driver_lines = ["- No driver decomposition available for this question."]
+        driver_lines = ["- No driver decomposition signals were available for this question."]
+
+    sources_lines = [f"- {s.title}: {s.url}" for s in sources]
     if not sources_lines:
-        sources_lines = ["- No external sources used for this answer."]
+        sources_lines = ["- No external sources were required for this answer."]
 
     return "\n".join(
         [
@@ -45,9 +76,9 @@ def compose_markdown_answer(
             *sources_lines,
             "",
             "### 4) Interpretation",
-            "- Interpret internal outputs first; use external refs as directional context.",
+            "- The interpretation prioritizes model-derived facts and uses external benchmarks as contextual checks.",
             "",
             "### 5) Recommendation / implication",
-            "- Stress-test the highest-impact assumptions before making decisions.",
+            "- Use this conclusion as a decision support signal and validate through targeted sensitivities on the key drivers above.",
         ]
     )
