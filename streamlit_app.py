@@ -56,7 +56,7 @@ MetricLabels = {
 def _run_model(
     excel_bytes: bytes | None,
     override_items: Tuple[Tuple[str, float | bool], ...],
-    seasonality_rows: Tuple[Tuple[str, float], ...],
+    monthly_generation_rows: Tuple[Tuple[str, float], ...],
     labour_rows: Tuple[Tuple[object, ...], ...],
     initial_investment_rows: Tuple[Tuple[object, ...], ...],
     cost_rows: Tuple[Tuple[object, ...], ...],
@@ -71,7 +71,7 @@ def _run_model(
     """Execute the financial model with optional overrides and return outputs."""
 
     overrides = dict(override_items)
-    seasonality_list = _rows_from_tuple(seasonality_rows, ("month", "share"))
+    monthly_generation_list = _rows_from_tuple(monthly_generation_rows, ("month", "expected_mwh"))
     labour_list = _rows_from_tuple(labour_rows, ("role", "annual_cost"))
     initial_investment_list = _rows_from_tuple(
         initial_investment_rows,
@@ -150,11 +150,21 @@ def _run_model(
     energy.degradation_rate = float(overrides["degradation_rate"])
     energy.annual_hours = max(0, int(round(float(overrides["annual_hours"]))))
 
-    if seasonality_list:
-        raw_shares: List[float] = [max(0.0, _coerce_float(row.get("share"))) for row in seasonality_list]
-        total = sum(raw_shares)
-        if total > 0 and len(raw_shares) == 12:
-            energy.seasonality = [value / total for value in raw_shares]
+    monthly_values: List[float] = []
+    if monthly_generation_list:
+        monthly_values = [
+            max(0.0, _coerce_float(row.get("expected_mwh")))
+            for row in monthly_generation_list
+        ]
+
+    if len(monthly_values) == 12:
+        energy.energy_model_mode = "monthly_expected_mwh"
+        energy.monthly_expected_mwh = monthly_values
+    else:
+        energy.energy_model_mode = "share_based"
+
+    energy.annual_production_growth_rate = float(overrides["annual_production_growth_rate"])
+    energy.monthly_min_mwh = float(overrides["monthly_min_mwh"])
 
     revenue = assumptions.revenue
     ppa_share = float(overrides["ppa_share"])
@@ -1722,6 +1732,23 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "min": 0.0,
         "step": 24.0,
     },
+    {
+        "id": "annual_production_growth_rate",
+        "label": "Annual Production Growth",
+        "value": 0.0,
+        "input_type": "percent",
+        "min": -0.5,
+        "max": 1.0,
+        "step": 0.005,
+    },
+    {
+        "id": "monthly_min_mwh",
+        "label": "Minimum Monthly Generation (MWh)",
+        "value": 10.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 1.0,
+    },
 ]
 
 
@@ -1924,19 +1951,19 @@ GOAL_SEEK_STATE_KEY = "goal_seek_config"
 GOAL_SEEK_MULTIPLIERS = tuple(float(x) for x in np.linspace(0.5, 1.5, 41))
 
 
-SEASONALITY_DEFAULTS = [
-    {"month": "January", "share": 0.05},
-    {"month": "February", "share": 0.05},
-    {"month": "March", "share": 0.05},
-    {"month": "April", "share": 0.10},
-    {"month": "May", "share": 0.12},
-    {"month": "June", "share": 0.17},
-    {"month": "July", "share": 0.17},
-    {"month": "August", "share": 0.10},
-    {"month": "September", "share": 0.05},
-    {"month": "October", "share": 0.04},
-    {"month": "November", "share": 0.05},
-    {"month": "December", "share": 0.05},
+MONTHLY_GENERATION_DEFAULTS = [
+    {"month": "January", "expected_mwh": 635.1},
+    {"month": "February", "expected_mwh": 635.1},
+    {"month": "March", "expected_mwh": 635.1},
+    {"month": "April", "expected_mwh": 1270.2},
+    {"month": "May", "expected_mwh": 1524.2},
+    {"month": "June", "expected_mwh": 2159.3},
+    {"month": "July", "expected_mwh": 2159.3},
+    {"month": "August", "expected_mwh": 1270.2},
+    {"month": "September", "expected_mwh": 635.1},
+    {"month": "October", "expected_mwh": 508.1},
+    {"month": "November", "expected_mwh": 635.1},
+    {"month": "December", "expected_mwh": 635.1},
 ]
 
 
@@ -2427,50 +2454,43 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
         )
 
 
-def _render_seasonality_table() -> List[Dict[str, object]]:
-    state_key = "seasonality_table"
+def _render_monthly_generation_table() -> List[Dict[str, object]]:
+    state_key = "monthly_generation_table"
     if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(SEASONALITY_DEFAULTS)
+        st.session_state[state_key] = copy.deepcopy(MONTHLY_GENERATION_DEFAULTS)
 
-    st.markdown("### Seasonal Production Profile")
+    st.markdown("### Expected Monthly Production (MWh)")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    total_share = 0.0
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
-            col_month, col_share, col_remove = st.columns([3, 2, 1])
+            col_month, col_mwh, col_remove = st.columns([3, 2, 1])
             month = col_month.text_input(
                 "Month",
                 value=str(row.get("month", "")),
                 key=f"{state_key}_month_{idx}",
             )
-            share = col_share.number_input(
-                "Share",
-                value=float(row.get("share", 0.0)),
-                key=f"{state_key}_share_{idx}",
+            expected_mwh = col_mwh.number_input(
+                "Expected MWh",
+                value=float(row.get("expected_mwh", 0.0)),
+                key=f"{state_key}_expected_mwh_{idx}",
                 min_value=0.0,
-                max_value=1.0,
-                step=0.001,
+                step=1.0,
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
             continue
-        total_share += share
-        updated_rows.append({"month": month, "share": share})
+        updated_rows.append({"month": month, "expected_mwh": expected_mwh})
 
     st.session_state[state_key] = updated_rows
 
-    if st.button("Add Seasonality Row", key=f"{state_key}_add"):
-        st.session_state[state_key].append({"month": "New Period", "share": 0.0})
+    if st.button("Add Monthly Production Row", key=f"{state_key}_add"):
+        st.session_state[state_key].append({"month": "New Period", "expected_mwh": 0.0})
 
     if updated_rows:
         if len(updated_rows) != 12:
-            st.warning("Seasonality should include 12 months to align with the model timeline.")
-        if not np.isclose(total_share, 1.0, atol=0.05):
-            st.info(
-                f"Current seasonality shares sum to {total_share:.2f}. The model will normalise values when running."
-            )
+            st.warning("Monthly production table should include 12 months to align with the model timeline.")
 
     return updated_rows
 
@@ -3384,7 +3404,7 @@ def _render_assumption_controls() -> tuple[
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
     _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
     _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
-    seasonality_rows = _render_seasonality_table()
+    monthly_generation_rows = _render_monthly_generation_table()
     _render_initial_investment_section()
     _render_labour_structure_section()
     _render_operating_expense_section()
@@ -3418,6 +3438,10 @@ def _render_assumption_controls() -> tuple[
         "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
         "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
         "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
+        "annual_production_growth_rate": float(
+            _get_row_value("energy_table", "annual_production_growth_rate", 0.0, float)
+        ),
+        "monthly_min_mwh": float(_get_row_value("energy_table", "monthly_min_mwh", 10.0, float)),
         "ppa_share": float(_get_row_value("revenue_table", "ppa_share", 0.90, float)),
         "ppa_rate": float(_get_row_value("revenue_table", "ppa_rate", 160.0, float)),
         "ppa_escalation": float(_get_row_value("revenue_table", "ppa_escalation", 0.015, float)),
@@ -3462,7 +3486,7 @@ def _render_assumption_controls() -> tuple[
     return (
         excel_bytes,
         overrides,
-        seasonality_rows,
+        monthly_generation_rows,
         labour_rows,
         initial_investment_rows,
         cost_rows,
@@ -3486,7 +3510,7 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
 
 
 def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs) -> None:
-    """Display core, global, energy, and seasonality summaries."""
+    """Display core, global, energy, and monthly production summaries."""
 
     global_cfg = assumptions.global_assumptions
     energy_cfg = assumptions.energy
@@ -3565,30 +3589,29 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
     energy_cols[2].metric("Degradation Rate", _format_percentage(energy_cfg.degradation_rate))
     energy_cols[3].metric("Annual Hours", f"{energy_cfg.annual_hours:,}")
 
-    st.markdown("#### Seasonal Production Profile")
-    seasonality_df = pd.DataFrame(
-        {
-            "Month": [
-                "Jan",
-                "Feb",
-                "Mar",
-                "Apr",
-                "May",
-                "Jun",
-                "Jul",
-                "Aug",
-                "Sep",
-                "Oct",
-                "Nov",
-                "Dec",
-            ],
-            "Share of Annual Output": assumptions.energy.seasonality,
-        }
-    )
-    seasonality_df["Share of Annual Output"] = seasonality_df["Share of Annual Output"].apply(
-        _format_percentage
-    )
-    st.dataframe(seasonality_df, use_container_width=True, hide_index=True)
+    st.markdown("#### Monthly Production Profile")
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    if assumptions.energy.energy_model_mode == "monthly_expected_mwh" and assumptions.energy.monthly_expected_mwh:
+        monthly_df = pd.DataFrame(
+            {
+                "Month": months,
+                "Expected MWh (Year 1)": assumptions.energy.monthly_expected_mwh,
+            }
+        )
+        st.metric("Minimum Monthly Generation", f"{assumptions.energy.monthly_min_mwh:,.2f} MWh")
+        st.metric(
+            "Annual Production Growth",
+            _format_percentage(assumptions.energy.annual_production_growth_rate),
+        )
+    else:
+        monthly_df = pd.DataFrame(
+            {
+                "Month": months,
+                "Share of Annual Output": assumptions.energy.seasonality,
+            }
+        )
+        monthly_df["Share of Annual Output"] = monthly_df["Share of Annual Output"].apply(_format_percentage)
+    st.dataframe(monthly_df, use_container_width=True, hide_index=True)
 
 
 def _render_overview(outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame]) -> None:
@@ -5116,7 +5139,7 @@ with tabs[0]:
     (
         excel_bytes,
         override_dict,
-        seasonality_rows,
+        monthly_generation_rows,
         labour_rows,
         initial_investment_rows,
         cost_rows,
@@ -5129,7 +5152,7 @@ with tabs[0]:
         risk_rows,
     ) = _render_assumption_controls()
 
-seasonality_tuple = _tupleize(seasonality_rows, ("month", "share"))
+monthly_generation_tuple = _tupleize(monthly_generation_rows, ("month", "expected_mwh"))
 labour_tuple = _tupleize(labour_rows, ("role", "annual_cost"))
 initial_investment_tuple = _tupleize(
     initial_investment_rows,
@@ -5185,7 +5208,7 @@ override_tuple = tuple(sorted(override_dict.items()))
 outputs, summary_tables, assumptions = _run_model(
     excel_bytes,
     override_tuple,
-    seasonality_tuple,
+    monthly_generation_tuple,
     labour_tuple,
     initial_investment_tuple,
     cost_tuple,

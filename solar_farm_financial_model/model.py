@@ -282,6 +282,16 @@ class SolarFarmFinancialModel:
         years = self._year_index()
         month_in_year = self._month_in_year()
 
+        if getattr(energy_cfg, "energy_model_mode", "share_based") == "monthly_expected_mwh":
+            expected = np.array(energy_cfg.monthly_expected_mwh, dtype=float)
+            annual_growth = float(getattr(energy_cfg, "annual_production_growth_rate", 0.0))
+            growth_factor = (1 + annual_growth) ** years
+            monthly_output = expected[month_in_year] * growth_factor
+            monthly_floor = float(getattr(energy_cfg, "monthly_min_mwh", 0.0))
+            if monthly_floor > 0:
+                monthly_output = np.maximum(monthly_output, monthly_floor)
+            return pd.Series(monthly_output, index=self._timeline, name="energy_mwh")
+
         base_annual_output = (
             energy_cfg.capacity_mw
             * energy_cfg.annual_hours
