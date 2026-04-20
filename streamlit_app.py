@@ -3738,7 +3738,7 @@ def _render_cash_flows(outputs: ModelOutputs) -> None:
 def _render_data_and_downloads(
     outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame], assumptions: Assumptions
 ) -> None:
-    """Expose the raw tables along with download buttons."""
+    """Expose the raw model tables."""
 
     st.subheader("Model tables")
     st.markdown("#### Monthly detail")
@@ -3750,8 +3750,10 @@ def _render_data_and_downloads(
     st.markdown("#### Metrics")
     st.dataframe(summary_tables["metrics"], use_container_width=True)
 
-    st.divider()
-    st.subheader("Downloads")
+def _render_downloads(
+    outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame], assumptions: Assumptions
+) -> None:
+    """Render export actions for the current model run."""
     st.write("Export polished presentation outputs for offline analysis.")
     workbook_key = "investor_workbook_bytes"
     workbook_signature = (
@@ -5232,6 +5234,9 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
     with tab:
         st.caption(projection_caption)
         if page_name == "Key Metrics Dashboard":
+            st.header("Downloads")
+            _render_downloads(outputs, summary_tables, assumptions)
+            st.divider()
             _render_assumption_snapshot(assumptions, outputs)
             st.divider()
             st.header("Overview")
@@ -5244,7 +5249,7 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_capital_and_debt(outputs)
             st.header("Cash Flow & Returns")
             _render_cash_flows(outputs)
-            st.header("Data & Downloads")
+            st.header("Data")
             _render_data_and_downloads(outputs, summary_tables, assumptions)
         elif page_name == "Financials":
             _render_financial_performance(outputs)
