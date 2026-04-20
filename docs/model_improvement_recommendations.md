@@ -1,70 +1,99 @@
-# Investor Attractiveness Review – Solar Farm Financial Model
+# Senior Financial Review – Solar Farm Model (Current State)
 
-## Executive view
-Using the repository default assumptions (10 MW plant, 20-year horizon, 10% discount rate), the current model produces a **negative project NPV (~-$11.0M)** and **non-meaningful equity/investor IRRs (`NaN`)**. This is a red flag for institutional investors and also indicates that the equity cash flow construction needs to be improved before using IRR as a decision KPI.
+## Executive assessment
+The model has improved materially and now includes stronger lender-style outputs (`CFADS`, `DSCR`, `capex_per_mw`, `opex_per_mwh`, and an LCOE proxy). It is now useful for first-pass project-finance screening. However, it still needs several structural upgrades to be fully investment-committee grade for utility-scale solar.
 
-## What is limiting investor appeal today
+## What is now working well
 
-1. **Equity cash flow is missing an explicit equity contribution draw profile**
-   - The model sets `equity_cash_flow = debt_free_cash_flow` directly, but does not model an initial equity injection line.
-   - Result: investor/equity IRR can become mathematically undefined (`NaN`) because the series may not include a proper negative equity outflow period.
+1. **Debt service analytics are embedded**
+   - Monthly `debt_service`, `cfads`, and `dscr` are calculated in-core, and annual DSCR is surfaced in annual summary outputs.
 
-2. **No lender-grade credit metrics are reported (DSCR, LLCR, PLCR)**
-   - Investors typically screen utility-scale projects first on debt service coverage and debt tail quality, then on IRR.
-   - The model has debt interest/principal schedules, so those ratios can be computed, but they are not yet surfaced.
+2. **Core efficiency and cost diagnostics exist**
+   - `capex_per_mw`, `opex_per_mwh`, and `lcoe_proxy_per_mwh` are now reported, which improves benchmarkability and technical-economic review.
 
-3. **Tax-equity and incentive layer is absent**
-   - There is tax logic for income/capital gains, but no explicit modeling of U.S. solar incentives (e.g., ITC/PTC pathways), transferability, or bonus depreciation impacts on after-tax equity returns.
+3. **Revenue-share validation added**
+   - The model now blocks invalid over-allocation of PPA + merchant shares above 100%.
 
-4. **Terminal growth input is present but not used in valuation logic**
-   - `terminal_growth_rate` exists in assumptions and UI, but terminal value uses only exit multiple logic.
-   - This can confuse investment committees and makes valuation methodology look incomplete.
+## Key gaps to prioritize (high impact)
 
-5. **Contracting and merchant risk are simplified**
-   - Revenue is modeled from static shares/rates with annual escalation, but without PPA tenor roll-off, shape risk, curtailment risk, merchant price distributions, or basis risk.
+### 1) Add explicit equity funding schedule and waterfall
+Current equity cash flow still behaves as a residual debt-free cash-flow proxy. Add:
+- construction-period equity draws,
+- operating-period distributions,
+- preferred return/hurdle logic (if applicable),
+- investor/owner waterfall (including catch-up tiers if needed).
 
-## Recommendations to improve investability
+**Why this matters:** IRR and equity multiple become economically valid and auditable.
 
-## Priority 1 (must-have for IC readiness)
+### 2) Upgrade debt module to full project-finance covenant quality
+Add:
+- LLCR/PLCR,
+- DSRA mechanics,
+- sculpted amortization against CFADS,
+- covenant default triggers and cure assumptions.
 
-### A) Build a true equity funding schedule
-- Add explicit equity draw line during construction (`equity_contribution`) so total sources = uses each month.
-- Redefine:
-  - `equity_cash_flow_to_investor = -equity_contribution + distributions`
-- Outcome: investor IRR and MOIC become economically meaningful.
+**Why this matters:** lenders and ICs evaluate downside resilience through these metrics, not DSCR alone.
 
-### B) Add covenant-grade debt metrics
-- Calculate and report monthly + annual:
-  - DSCR = CFADS / Debt Service
-  - LLCR = NPV(CFADS over loan life) / debt balance
-  - Debt yield = EBITDA / debt balance
-- Add downside case covenant headroom (P50/P90 production and merchant downside).
+### 3) Replace simplified tax treatment with jurisdiction-grade tax stack
+Add:
+- ITC/PTC pathways,
+- MACRS/bonus depreciation,
+- tax-equity transferability/partnership allocations (if relevant),
+- NOL handling and carryforward logic.
 
-### C) Add explicit incentives module
-- Add scenario toggles for ITC/PTC treatment and depreciation/tax shield impacts.
-- Show before/after impact on NPV, equity IRR, and payback.
+**Why this matters:** post-tax equity returns can change materially and often determine deal viability.
 
-## Priority 2 (value uplift levers)
+### 4) Improve merchant and contract realism
+Add:
+- PPA tenor roll-off,
+- merchant curve by year (not only constant escalation),
+- optional curtailment and availability assumptions,
+- degradation-performance warranty interactions.
 
-### D) Expand bankability of revenue stack
-- Model PPA tenor and step-down to merchant pricing after contract expiry.
-- Add curtailment + availability assumptions and optional floor/hedge structure.
+**Why this matters:** valuation and debt sizing are highly sensitive to post-PPA cash-flow quality.
 
-### E) Separate O&M into fixed, indexed, and lifecycle replacements
-- Keep current fixed/variable buckets, but add major maintenance reserve and inverter replacement cycle.
+### 5) Strengthen terminal valuation architecture
+Add selectable methods:
+- exit multiple,
+- Gordon-growth using terminal growth,
+- salvage/decommissioning netting,
+- explicit working-capital release at exit.
 
-### F) Add exit-method choice
-- Keep EBITDA multiple method, and add Gordon-growth option using `terminal_growth_rate`.
-- Let users compare valuation methods side-by-side.
+**Why this matters:** terminal value often drives long-horizon project NPV and must be method-transparent.
 
-## Quick sensitivity insights from current defaults
+### 6) Improve CAPEX realism and lifecycle modeling
+Add:
+- construction schedule by package and contingency draw rules,
+- owner’s costs, IDC and financing fees,
+- lifecycle replacement CAPEX (especially inverters),
+- degradation-linked augmentation where relevant.
 
-Directional tests against defaults show that the largest value lever is **capital structure + capex + contracted price quality together**. A combined scenario (10% capex reduction, 70% debt at 6%, stronger PPA mix/price, and 15% opex reduction) improves project NPV materially versus base case, but still remains negative, indicating that additional structural changes are needed (especially incentives and realistic equity structuring).
+**Why this matters:** under-modeled lifecycle CAPEX overstates long-term equity value.
 
-## Practical next implementation sprint
-1. **Financial plumbing**: equity contribution schedule + DSCR/LLCR outputs.
-2. **Tax/incentives**: ITC/PTC and depreciation options.
-3. **Revenue risk**: PPA tenor roll-off + merchant downside cases.
-4. **Decision dashboard**: investment committee page with NPV/IRR/MOIC/DSCR covenant summary in base/upside/downside.
+### 7) Introduce probabilistic downside diagnostics for IC discussion
+Keep deterministic base case, but add:
+- P50/P90 generation cases,
+- downside merchant-price cases,
+- debt covenant breach probability snapshots.
 
-These four deliverables will materially improve investor confidence because they address the exact diligence questions asked by infrastructure equity, tax equity, and project finance lenders.
+**Why this matters:** decision-makers need distributional risk insight, not only base/upside/downside points.
+
+### 8) Add full traceability outputs for auditability
+Produce dedicated schedule tabs/dataframes for:
+- Sources & Uses,
+- Debt covenant table,
+- Tax bridge,
+- Return bridge (NPV/IRR drivers),
+- Reconciliation checks.
+
+**Why this matters:** traceability is critical for credit committee and investor diligence confidence.
+
+## Recommended implementation sequence (practical)
+1. **Equity funding + waterfall + sources/uses reconciliation**
+2. **Debt covenant stack (LLCR/PLCR/DSRA/sculpting)**
+3. **Tax and incentives module**
+4. **Contract/merchant curve realism + curtailment**
+5. **Terminal valuation methods + decommissioning and WC release**
+6. **Probabilistic risk pack (P50/P90 + covenant risk)**
+
+If executed in this order, the model can move from “good screening tool” to “investment-committee and lender-ready underwriting model.”
