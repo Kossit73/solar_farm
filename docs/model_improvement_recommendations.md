@@ -97,3 +97,41 @@ Produce dedicated schedule tabs/dataframes for:
 6. **Probabilistic risk pack (P50/P90 + covenant risk)**
 
 If executed in this order, the model can move from “good screening tool” to “investment-committee and lender-ready underwriting model.”
+
+## Additional bankability recommendations (senior lender perspective)
+
+To move from technically improved to truly financeable in debt markets, add the following lender controls and deliverables:
+
+1. **Base/Downside covenant case pack**
+   - Mandatory base case + lender downside case with explicit DSCR lock-up, default, and cure paths.
+   - Include minimum DSCR by year, average DSCR, and debt tail profile in each case.
+
+2. **Debt term-sheet switchboard**
+   - Parameterize common debt terms: margin grids, commitment/arrangement fees, amortization type, DSRA rules, prepayment assumptions, and cash sweep triggers.
+   - Allow side-by-side debt structure comparison for bank club vs. institutional debt.
+
+3. **Construction-to-operation transition controls**
+   - Add COD tests, liquidated damages assumptions, delay scenarios, and EPC warranty logic.
+   - Include contingency draw waterfall and residual contingency release rules.
+
+4. **Operating reserve framework**
+   - Distinguish DSRA, major maintenance reserve, and inverter reserve.
+   - Track reserve funding and release logic with auditable cash-account rollforwards.
+
+5. **Independent engineer alignment outputs**
+   - Add P50/P75/P90 generation and availability assumptions with clear mapping to energy model inputs.
+   - Provide a reconciliation table from technical assumptions to financial energy outcomes.
+
+6. **Merchant risk and hedge module**
+   - Add hedge/floor structures, basis risk assumptions, and shaping losses.
+   - Include post-PPA merchant tail valuation under conservative and stressed curves.
+
+7. **Counterparty and legal risk overlay**
+   - PPA off-taker quality scoring, curtailment compensation rules, termination provisions, and change-in-law sensitivity.
+   - Flag where legal protections are assumed but not modeled economically.
+
+8. **IC-ready outputs and audit package**
+   - One-click package with: assumptions memo, covenant dashboard, downside bridge, return attribution bridge, and reconciliation checks.
+   - Ensure all key outputs are traceable back to assumptions and intermediate schedules.
+
+These additions are typically what convert a strong internal model into a lender- and credit-committee-acceptable underwriting model.
