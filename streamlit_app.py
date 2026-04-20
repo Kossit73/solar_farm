@@ -187,6 +187,10 @@ def _run_model(
     energy.capacity_factor = float(overrides["capacity_factor"])
     energy.degradation_rate = float(overrides["degradation_rate"])
     energy.annual_hours = max(0, int(round(float(overrides["annual_hours"]))))
+    energy.panel_count = max(0.0, float(overrides["panel_count"]))
+    energy.panel_watt_dc = max(0.0, float(overrides["panel_watt_dc"]))
+    energy.panel_unit_cost = max(0.0, float(overrides["panel_unit_cost"]))
+    energy.dc_ac_ratio = max(0.1, float(overrides["dc_ac_ratio"]))
 
     monthly_values: List[float] = []
     if monthly_generation_list:
@@ -1763,6 +1767,38 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "input_type": "number",
         "min": 0.0,
         "step": 24.0,
+    },
+    {
+        "id": "panel_count",
+        "label": "Panel Count",
+        "value": 0.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 100.0,
+    },
+    {
+        "id": "panel_watt_dc",
+        "label": "Panel Watt (DC)",
+        "value": 550.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 10.0,
+    },
+    {
+        "id": "panel_unit_cost",
+        "label": "Panel Unit Cost ($/panel)",
+        "value": 0.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 5.0,
+    },
+    {
+        "id": "dc_ac_ratio",
+        "label": "DC/AC Ratio",
+        "value": 1.25,
+        "input_type": "number",
+        "min": 0.1,
+        "step": 0.01,
     },
     {
         "id": "annual_production_growth_rate",
@@ -3470,6 +3506,10 @@ def _render_assumption_controls() -> tuple[
         "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
         "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
         "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
+        "panel_count": float(_get_row_value("energy_table", "panel_count", 0.0, float)),
+        "panel_watt_dc": float(_get_row_value("energy_table", "panel_watt_dc", 550.0, float)),
+        "panel_unit_cost": float(_get_row_value("energy_table", "panel_unit_cost", 0.0, float)),
+        "dc_ac_ratio": float(_get_row_value("energy_table", "dc_ac_ratio", 1.25, float)),
         "annual_production_growth_rate": float(
             _get_row_value("energy_table", "annual_production_growth_rate", 0.0, float)
         ),

@@ -114,6 +114,7 @@ class SolarFarmFinancialModel:
 
     def run(self) -> ModelOutputs:
         """Execute the projection and return consolidated outputs."""
+        self._apply_panel_linkages()
 
         monthly = pd.DataFrame(index=self._timeline)
         monthly.index.name = "month_start"
@@ -250,6 +251,25 @@ class SolarFarmFinancialModel:
             metrics=metrics,
             asset_summaries=asset_summaries,
         )
+
+    def _apply_panel_linkages(self) -> None:
+        """Link panel count/cost assumptions to capacity and panel CAPEX where provided."""
+        energy_cfg = self.assumptions.energy
+        panel_count = float(getattr(energy_cfg, "panel_count", 0.0))
+        panel_watt_dc = float(getattr(energy_cfg, "panel_watt_dc", 0.0))
+        panel_unit_cost = float(getattr(energy_cfg, "panel_unit_cost", 0.0))
+        dc_ac_ratio = max(1e-6, float(getattr(energy_cfg, "dc_ac_ratio", 1.25)))
+
+        if panel_count > 0 and panel_watt_dc > 0:
+            capacity_mw_dc = panel_count * panel_watt_dc / 1_000_000
+            energy_cfg.capacity_mw = capacity_mw_dc / dc_ac_ratio
+
+        if panel_count > 0 and panel_unit_cost > 0:
+            panel_capex = panel_count * panel_unit_cost
+            for item in self.assumptions.capex_items:
+                if str(getattr(item, "name", "")).strip().lower() == "solar panels":
+                    item.amount = panel_capex
+                    break
 
     # ------------------------------------------------------------------
     # Timeline helpers

@@ -32,6 +32,10 @@ class EnergyAssumptions:
     monthly_expected_mwh: Sequence[float] | None = None
     annual_production_growth_rate: float = 0.0
     monthly_min_mwh: float = 0.0
+    panel_count: float = 0.0
+    panel_watt_dc: float = 0.0
+    panel_unit_cost: float = 0.0
+    dc_ac_ratio: float = 1.25
     seasonality: Sequence[float] = field(
         default_factory=lambda: [
             0.05,
@@ -52,6 +56,14 @@ class EnergyAssumptions:
     def validate(self) -> None:
         if self.monthly_min_mwh < 0:
             raise ValueError("Monthly minimum MWh cannot be negative.")
+        if self.panel_count < 0:
+            raise ValueError("panel_count cannot be negative.")
+        if self.panel_watt_dc < 0:
+            raise ValueError("panel_watt_dc cannot be negative.")
+        if self.panel_unit_cost < 0:
+            raise ValueError("panel_unit_cost cannot be negative.")
+        if self.dc_ac_ratio <= 0:
+            raise ValueError("dc_ac_ratio must be greater than zero.")
 
         if self.energy_model_mode == "monthly_expected_mwh":
             if self.monthly_expected_mwh is None:
