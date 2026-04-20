@@ -134,7 +134,17 @@ class SolarFarmFinancialModel:
         monthly = monthly.join(fixed_opex)
         monthly = monthly.join(variable_opex)
         monthly["total_opex"] = monthly.filter(like="opex_").sum(axis=1)
+        legal_opex_adder = max(0.0, float(getattr(self.assumptions, "change_in_law_opex_per_mwh", 0.0)))
+        if legal_opex_adder > 0:
+            monthly["opex_change_in_law"] = monthly["energy_mwh"] * legal_opex_adder
+            monthly["total_opex"] = monthly["total_opex"] + monthly["opex_change_in_law"]
         monthly["capex"] = capex + self._compute_lifecycle_capex()
+        arrangement_fee_rate = max(0.0, float(getattr(self.assumptions, "arrangement_fee_rate", 0.0)))
+        monthly["arrangement_fees"] = 0.0
+        if arrangement_fee_rate > 0 and self.assumptions.debt_facilities:
+            upfront_fees = sum(f.principal for f in self.assumptions.debt_facilities) * arrangement_fee_rate
+            monthly.iloc[0, monthly.columns.get_loc("capex")] += upfront_fees
+            monthly.iloc[0, monthly.columns.get_loc("arrangement_fees")] = upfront_fees
         monthly["depreciation"] = depreciation
         monthly["ppe_opening_balance"] = opening_ppe
         monthly = monthly.join(debt_schedule)
@@ -187,8 +197,20 @@ class SolarFarmFinancialModel:
         monthly["dsra_required"] = self._compute_dsra_required(monthly["debt_service"])
         monthly["dsra_change"] = monthly["dsra_required"].diff().fillna(monthly["dsra_required"])
         monthly["cash_after_dsra"] = monthly["debt_free_cash_flow"] - monthly["dsra_change"]
+        maintenance_reserve_rate = max(0.0, float(getattr(self.assumptions, "major_maintenance_reserve_rate", 0.0)))
+        inverter_reserve_rate = max(0.0, float(getattr(self.assumptions, "inverter_reserve_rate", 0.0)))
+        monthly["major_maintenance_reserve_deposit"] = monthly["cash_after_dsra"].clip(lower=0) * maintenance_reserve_rate
+        monthly["inverter_reserve_deposit"] = monthly["cash_after_dsra"].clip(lower=0) * inverter_reserve_rate
+        monthly["cash_after_reserves"] = (
+            monthly["cash_after_dsra"]
+            - monthly["major_maintenance_reserve_deposit"]
+            - monthly["inverter_reserve_deposit"]
+        )
+        cash_sweep_pct = max(0.0, min(1.0, float(getattr(self.assumptions, "cash_sweep_pct", 0.0))))
+        monthly["cash_sweep"] = monthly["cash_after_reserves"].clip(lower=0) * cash_sweep_pct
+        monthly["cash_after_sweep"] = monthly["cash_after_reserves"] - monthly["cash_sweep"]
         monthly["equity_contribution"] = (monthly["capex"] - monthly["debt_draw"]).clip(lower=0)
-        monthly["equity_distribution"] = monthly["cash_after_dsra"].clip(lower=0)
+        monthly["equity_distribution"] = monthly["cash_after_sweep"].clip(lower=0)
         monthly["equity_cash_flow"] = -monthly["equity_contribution"] + monthly["equity_distribution"]
 
         terminal_cash = self._compute_terminal_value(monthly)
@@ -212,6 +234,9 @@ class SolarFarmFinancialModel:
             + monthly["debt_principal"]
             + monthly["tax_payment"]
             + monthly["dsra_change"]
+            + monthly["major_maintenance_reserve_deposit"]
+            + monthly["inverter_reserve_deposit"]
+            + monthly["cash_sweep"]
             + monthly["delta_working_capital"]
         )
         monthly["sources_uses_gap"] = monthly["sources_total"] - monthly["uses_total"]
@@ -298,14 +323,34 @@ class SolarFarmFinancialModel:
             years,
         )
 
-        ppa_energy = energy.values * revenue_cfg.ppa.share_of_output
-        merchant_energy = energy.values * revenue_cfg.merchant.share_of_output
+        ppa_share = np.full(len(self._timeline), revenue_cfg.ppa.share_of_output, dtype=float)
+        merchant_share = np.full(len(self._timeline), revenue_cfg.merchant.share_of_output, dtype=float)
+        ppa_term_years = int(getattr(self.assumptions, "ppa_term_years", 0))
+        if ppa_term_years > 0:
+            expired = years >= ppa_term_years
+            merchant_share[expired] = merchant_share[expired] + ppa_share[expired]
+            ppa_share[expired] = 0.0
+
+        hedge_floor_price = float(getattr(self.assumptions, "merchant_floor_price", 0.0))
+        if hedge_floor_price > 0:
+            merchant_rate = np.maximum(merchant_rate, hedge_floor_price)
+
+        ppa_energy = energy.values * ppa_share
+        merchant_energy = energy.values * merchant_share
         rec_energy = energy.values  # assume RECs on all generation
 
         revenue_df = pd.DataFrame(index=self._timeline)
         revenue_df["revenue_ppa"] = ppa_energy * ppa_rate
         revenue_df["revenue_merchant"] = merchant_energy * merchant_rate
         revenue_df["revenue_rec"] = rec_energy * rec_rate
+        counterparty_haircut = max(0.0, min(0.95, float(getattr(self.assumptions, "ppa_counterparty_haircut", 0.0))))
+        if counterparty_haircut > 0:
+            revenue_df["revenue_ppa"] = revenue_df["revenue_ppa"] * (1 - counterparty_haircut)
+
+        cod_month = max(1, int(getattr(self.assumptions, "cod_month", 1)))
+        cod_mask = self._start_month_mask(cod_month)
+        for col in revenue_df.columns:
+            revenue_df[col] = revenue_df[col] * cod_mask
         return revenue_df
 
     # ------------------------------------------------------------------
@@ -553,6 +598,12 @@ class SolarFarmFinancialModel:
         equity_multiple = positive_equity / negative_equity if negative_equity > 0 else float("nan")
         llcr, plcr = self._compute_coverage_ratios(monthly, discount_rate)
         downside_npvs = self._compute_downside_npv_distribution(monthly, discount_rate)
+        generation_sigma = max(0.0, float(getattr(self.assumptions, "generation_uncertainty", 0.10)))
+        annual_energy = total_energy / max(1.0, self.assumptions.global_assumptions.forecast_months / 12.0)
+        p50_energy = annual_energy
+        p75_energy = annual_energy * (1 - 0.674 * generation_sigma)
+        p90_energy = annual_energy * (1 - 1.282 * generation_sigma)
+        covenant_breach_months = int((monthly["dscr"] < float(getattr(self.assumptions, "min_dscr_covenant", 1.20))).sum())
 
         metrics = {
             "project_npv": npv(discount_rate, project_cash_flow),
@@ -572,6 +623,10 @@ class SolarFarmFinancialModel:
             "downside_npv_p10": float(np.percentile(downside_npvs, 10)) if len(downside_npvs) else float("nan"),
             "downside_npv_p50": float(np.percentile(downside_npvs, 50)) if len(downside_npvs) else float("nan"),
             "downside_npv_p90": float(np.percentile(downside_npvs, 90)) if len(downside_npvs) else float("nan"),
+            "annual_energy_p50_mwh": p50_energy,
+            "annual_energy_p75_mwh": p75_energy,
+            "annual_energy_p90_mwh": p90_energy,
+            "covenant_breach_months": covenant_breach_months,
         }
         return metrics
 
@@ -597,9 +652,13 @@ class SolarFarmFinancialModel:
                 "delta_working_capital": "sum",
                 "energy_mwh": "sum",
                 "itc_benefit": "sum",
+                "arrangement_fees": "sum",
                 "equity_contribution": "sum",
                 "equity_distribution": "sum",
                 "dsra_change": "sum",
+                "major_maintenance_reserve_deposit": "sum",
+                "inverter_reserve_deposit": "sum",
+                "cash_sweep": "sum",
                 "sources_total": "sum",
                 "uses_total": "sum",
                 "sources_uses_gap": "sum",

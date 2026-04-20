@@ -135,3 +135,16 @@ To move from technically improved to truly financeable in debt markets, add the 
    - Ensure all key outputs are traceable back to assumptions and intermediate schedules.
 
 These additions are typically what convert a strong internal model into a lender- and credit-committee-acceptable underwriting model.
+
+## 8-point implementation verification checklist (current build)
+
+1. **Equity funding + waterfall** – Implemented in core cash-flow plumbing (`equity_contribution`, reserve-adjusted distributions, and resulting `equity_cash_flow`).  
+2. **Covenant-grade debt stack** – Implemented at proxy level (`CFADS`, `DSCR`, DSRA requirement/change, LLCR/PLCR proxies, covenant breach count).  
+3. **Tax/incentive treatment** – Implemented baseline modules (optional bonus depreciation and ITC realization timing).  
+4. **Contract/merchant realism** – Implemented baseline controls (curtailment, PPA-term roll-off, merchant floor price, counterparty haircut).  
+5. **Terminal valuation architecture** – Implemented selectable terminal method (`multiple` / `gordon`).  
+6. **Lifecycle CAPEX realism** – Implemented optional replacement-year/fraction lifecycle CAPEX schedule.  
+7. **Probabilistic downside diagnostics** – Implemented downside NPV distribution with P10/P50/P90 plus P50/P75/P90 energy diagnostics.  
+8. **Traceability/reconciliation schedules** – Implemented monthly/annual sources-uses and reserve/fee schedules with reconciliation gap output.
+
+> Note: Items above are implemented to materially improve bankability, but some components are intentionally proxy-level (especially covenant architecture and tax depth) and should be hardened further for full lender model compliance.
