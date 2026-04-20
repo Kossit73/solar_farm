@@ -6,6 +6,7 @@ import copy
 import io
 import html
 import math
+import os
 import re
 import tempfile
 import uuid
@@ -51,6 +52,17 @@ MetricLabels = {
     "owner_irr": "Owner IRR",
     "project_payback_months": "Payback (months)",
 }
+
+
+def _configure_openai_api_key() -> bool:
+    """Load OPENAI_API_KEY from environment or Streamlit secrets when available."""
+    if os.environ.get("OPENAI_API_KEY"):
+        return True
+    secret_key = st.secrets.get("OPENAI_API_KEY", "")
+    if secret_key:
+        os.environ["OPENAI_API_KEY"] = str(secret_key)
+        return True
+    return False
 
 
 @st.cache_data(show_spinner=False)
@@ -509,6 +521,13 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
     st.caption(
         "Model-grounded and benchmark-aware copilot for valuation, profitability, leverage, pricing, efficiency, and risk."
     )
+    if os.environ.get("OPENAI_API_KEY"):
+        st.success("GPT-5 + web_search path is enabled (OPENAI_API_KEY detected).")
+    else:
+        st.warning(
+            "OPENAI_API_KEY not detected. Chatbot is running in local fallback mode. "
+            "Set OPENAI_API_KEY (env or Streamlit secrets) to enable GPT-5 + web_search reasoning."
+        )
 
     if "ai_chat_history" not in st.session_state:
         st.session_state["ai_chat_history"] = []
@@ -5111,6 +5130,7 @@ def _render_break_even(outputs: ModelOutputs) -> None:
 
 st.title("Solar Farm Financial Model")
 st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
+_configure_openai_api_key()
 
 DEFAULT_PROJECT_NAME = "Solar 123, LLC"
 
