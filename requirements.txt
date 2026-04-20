@@ -2,3 +2,4 @@ numpy>=1.23
 pandas>=1.5
 streamlit>=1.30
 openpyxl>=3.1
+openai>=1.40
