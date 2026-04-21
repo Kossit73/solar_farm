@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 from typing import List
 
-from openai import OpenAI
-
+from .providers import LLMProviderConfig, build_adapter, provider_capabilities
 from .types import AssistantTurn, EvidencePacket, QuestionPlan, SourceRef
 
 SYSTEM_PROMPT = """You are an intelligent reasoning chatbot for financial and operating models.
@@ -79,11 +77,9 @@ def generate_reasoned_answer(
     packet: EvidencePacket,
     memory_turns: List[AssistantTurn],
     preloaded_sources: List[SourceRef],
+    config: LLMProviderConfig,
 ) -> str:
     """Generate reasoning-first answer with optional web_search tool access."""
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    model_name = os.environ.get("OPENAI_MODEL", "gpt-5")
-
     source_md = "\n".join(f"- {s.title}: {s.url}" for s in preloaded_sources) or "- None preloaded"
     user_context = (
         f"Question: {question}\n\n"
@@ -96,14 +92,12 @@ def generate_reasoned_answer(
         "Respond in the required structure and keep the answer concise but complete."
     )
 
-    response = client.responses.create(
-        model=model_name,
-        reasoning={"effort": "medium"},
-        tools=[{"type": "web_search"}],
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *_memory_to_messages(memory_turns),
-            {"role": "user", "content": user_context},
-        ],
-    )
-    return response.output_text
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *_memory_to_messages(memory_turns),
+        {"role": "user", "content": user_context},
+    ]
+    capabilities = provider_capabilities(config.provider_name)
+    use_web_search = bool(plan.needs_web and config.enable_web_search and capabilities.web_search)
+    adapter = build_adapter(config)
+    return adapter.generate_response(messages=messages, use_web_search=use_web_search)

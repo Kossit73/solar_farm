@@ -26,6 +26,14 @@ from openpyxl.utils import get_column_letter
 
 from solar_farm_financial_model.data_loader import load_assumptions
 from solar_farm_financial_model.ai import ConversationMemory, run_assistant_turn
+from solar_farm_financial_model.ai.providers import (
+    PROVIDER_SPECS,
+    env_api_key,
+    provider_capabilities,
+    provider_default_base_url,
+    provider_label,
+    provider_models,
+)
 from solar_farm_financial_model.model import (
     ModelOutputs,
     SolarFarmFinancialModel,
@@ -54,40 +62,95 @@ MetricLabels = {
 }
 
 
-def _configure_openai_api_key() -> bool:
-    """Load OPENAI_API_KEY from environment or Streamlit secrets when available."""
-    if os.environ.get("OPENAI_API_KEY"):
-        return True
-    secret_key = st.secrets.get("OPENAI_API_KEY", "")
-    if secret_key:
-        os.environ["OPENAI_API_KEY"] = str(secret_key)
-        return True
-    return False
-
-
-def _render_llm_settings() -> None:
-    """Allow users to insert API key and choose model at runtime."""
+def _render_llm_settings() -> Dict[str, object]:
+    """Render provider-agnostic LLM settings and return active config."""
     with st.expander("LLM Settings", expanded=False):
-        api_key_value = st.text_input(
-            "OpenAI API Key",
-            value="",
-            type="password",
-            placeholder="sk-...",
-            help="Entered key is stored in current session environment only.",
-        )
-        if api_key_value:
-            os.environ["OPENAI_API_KEY"] = api_key_value.strip()
-            st.success("OpenAI API key applied for this session.")
+        provider_options = list(PROVIDER_SPECS.keys())
+        current_provider = str(st.session_state.get("llm_provider_name", "openai"))
+        if current_provider not in provider_options:
+            current_provider = "openai"
 
-        default_model = os.environ.get("OPENAI_MODEL", "gpt-5")
-        model_choice = st.selectbox(
-            "LLM Model",
-            options=["gpt-5", "gpt-5-mini"],
-            index=0 if default_model == "gpt-5" else 1,
-            help="Model used by the AI Reasoning Chatbot when API key is available.",
+        provider_name = st.selectbox(
+            "Provider",
+            options=provider_options,
+            index=provider_options.index(current_provider),
+            format_func=provider_label,
+            key="llm_provider_name",
         )
-        os.environ["OPENAI_MODEL"] = model_choice
-        st.caption(f"Current LLM model: `{model_choice}`")
+        models = provider_models(provider_name)
+        current_model = str(st.session_state.get("llm_model_name", models[0]))
+        if current_model not in models:
+            current_model = models[0]
+        model_name = st.selectbox(
+            "Model",
+            options=models,
+            index=models.index(current_model),
+            key="llm_model_name",
+        )
+
+        default_api_key = env_api_key(provider_name)
+        api_key_value = st.text_input(
+            f"{provider_label(provider_name)} API Key",
+            value=st.session_state.get("llm_api_key", default_api_key),
+            type="password",
+            placeholder="Enter API key",
+            help="Entered key is stored in current session environment only.",
+            key="llm_api_key",
+        )
+        base_url = st.text_input(
+            "Base URL (optional)",
+            value=st.session_state.get("llm_base_url", provider_default_base_url(provider_name)),
+            placeholder="https://...",
+            key="llm_base_url",
+        )
+        temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1, key="llm_temperature")
+        max_tokens = st.number_input("Max Tokens", min_value=128, max_value=8192, value=1200, step=128, key="llm_max_tokens")
+        reasoning_mode = st.selectbox("Reasoning Mode", options=["low", "medium", "high"], index=1, key="llm_reasoning_mode")
+        enable_tools = st.checkbox("Enable Tool Calls", value=True, key="llm_enable_tools")
+        enable_web_search = st.checkbox("Enable Web Search (if supported)", value=True, key="llm_enable_web_search")
+
+        caps = provider_capabilities(provider_name)
+        st.caption(
+            "Capabilities: "
+            f"reasoning={'✅' if caps.reasoning else '—'}, "
+            f"long_context={'✅' if caps.long_context else '—'}, "
+            f"tool_use={'✅' if caps.tool_use else '—'}, "
+            f"web_search={'✅' if caps.web_search else '—'}, "
+            f"vision={'✅' if caps.vision else '—'}, "
+            f"streaming={'✅' if caps.streaming else '—'}"
+        )
+
+    return {
+        "provider_name": provider_name,
+        "model_name": model_name,
+        "api_key": api_key_value.strip(),
+        "base_url": base_url.strip(),
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "reasoning_mode": reasoning_mode,
+        "enable_tools": bool(enable_tools),
+        "enable_web_search": bool(enable_web_search),
+    }
+
+
+def _configure_llm_secrets() -> None:
+    """Load provider API keys from Streamlit secrets when available."""
+    secret_keys = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY",
+        "COHERE_API_KEY",
+        "XAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "LLAMA_API_KEY",
+    ]
+    for key in secret_keys:
+        if os.environ.get(key):
+            continue
+        secret_value = st.secrets.get(key, "")
+        if secret_value:
+            os.environ[key] = str(secret_value)
 
 
 @st.cache_data(show_spinner=False)
@@ -550,13 +613,15 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
     st.caption(
         "Model-grounded and benchmark-aware copilot for valuation, profitability, leverage, pricing, efficiency, and risk."
     )
-    _render_llm_settings()
-    if os.environ.get("OPENAI_API_KEY"):
-        st.success("GPT-5 + web_search path is enabled (OPENAI_API_KEY detected).")
+    llm_config = _render_llm_settings()
+    if llm_config.get("api_key"):
+        provider = provider_label(str(llm_config.get("provider_name", "openai")))
+        model = str(llm_config.get("model_name", ""))
+        st.success(f"{provider} configured (`{model}`).")
     else:
         st.warning(
-            "OPENAI_API_KEY not detected. Chatbot is running in local fallback mode. "
-            "Set OPENAI_API_KEY (env or Streamlit secrets) to enable GPT-5 + web_search reasoning."
+            "No provider API key detected. Chatbot is running in local fallback mode. "
+            "Set a provider key in LLM Settings to enable hosted reasoning."
         )
 
     if "ai_chat_history" not in st.session_state:
@@ -579,6 +644,7 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
         outputs=outputs,
         assumptions=assumptions,
         memory=st.session_state["ai_memory"],
+        llm_config=llm_config,
     )
     st.session_state["ai_memory"] = memory
     st.session_state["ai_chat_history"].append({"question": prompt, "answer": turn.answer_markdown})
@@ -5217,7 +5283,7 @@ def _render_break_even(outputs: ModelOutputs) -> None:
 
 st.title("Solar Farm Financial Model")
 st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
-_configure_openai_api_key()
+_configure_llm_secrets()
 
 DEFAULT_PROJECT_NAME = "Solar 123, LLC"
 

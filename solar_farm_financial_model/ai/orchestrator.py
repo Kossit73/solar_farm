@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import os
 from typing import Tuple
 
 from solar_farm_financial_model.model import ModelOutputs
@@ -12,6 +11,7 @@ from .composer import compose_markdown_answer, infer_confidence
 from .llm_reasoner import generate_reasoned_answer
 from .memory import ConversationMemory, memory_to_prompt_context, update_memory
 from .planner import build_plan
+from .providers import LLMProviderConfig, env_api_key
 from .retriever import rank_and_filter_sources, retrieve_external_benchmarks
 from .types import AssistantTurn
 
@@ -21,6 +21,7 @@ def run_assistant_turn(
     outputs: ModelOutputs,
     assumptions: Assumptions,
     memory: ConversationMemory,
+    llm_config: dict | None = None,
 ) -> Tuple[AssistantTurn, ConversationMemory]:
     """Execute one reasoning turn using model-first analysis and optional web validation."""
     model_context = build_model_context(outputs, assumptions)
@@ -32,15 +33,26 @@ def run_assistant_turn(
     if plan.needs_web and plan.web_query:
         sources = rank_and_filter_sources(retrieve_external_benchmarks(plan.web_query))
 
-    use_llm = bool(os.environ.get("OPENAI_API_KEY"))
+    cfg = LLMProviderConfig(**(llm_config or {}))
+    if not cfg.api_key:
+        cfg.api_key = env_api_key(cfg.provider_name)
+    use_llm = bool(cfg.api_key)
     if use_llm:
-        answer = generate_reasoned_answer(
-            question=question,
-            plan=plan,
-            packet=packet,
-            memory_turns=memory.turns,
-            preloaded_sources=sources,
-        )
+        try:
+            answer = generate_reasoned_answer(
+                question=question,
+                plan=plan,
+                packet=packet,
+                memory_turns=memory.turns,
+                preloaded_sources=sources,
+                config=cfg,
+            )
+        except Exception as exc:
+            answer = (
+                f"LLM provider call failed (`{cfg.provider_name}`): {exc}\n\n"
+                "Falling back to local model-grounded response.\n\n"
+                + compose_markdown_answer(plan, packet, sources)
+            )
     else:
         answer = compose_markdown_answer(plan, packet, sources)
     confidence = infer_confidence(plan, packet, sources)
