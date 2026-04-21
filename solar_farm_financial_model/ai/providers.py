@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
+from urllib.request import Request, urlopen
 
 from openai import OpenAI
 
@@ -39,26 +41,26 @@ PROVIDER_SPECS: Dict[str, Dict[str, object]] = {
     },
     "anthropic": {
         "label": "Anthropic Claude",
-        "models": ["claude-opus-4", "claude-sonnet-4"],
-        "default_base_url": "",
+        "models": ["claude-opus-4-1", "claude-sonnet-4-0"],
+        "default_base_url": "https://api.anthropic.com",
         "capabilities": ProviderCapabilities(True, True, True, False, True, True),
     },
     "google": {
         "label": "Google Gemini",
         "models": ["gemini-2.5-pro"],
-        "default_base_url": "",
+        "default_base_url": "https://generativelanguage.googleapis.com",
         "capabilities": ProviderCapabilities(True, True, True, True, True, True),
     },
     "mistral": {
         "label": "Mistral",
         "models": ["mistral-large-latest", "mistral-medium-latest", "magistral-medium-latest"],
-        "default_base_url": "https://api.mistral.ai/v1",
+        "default_base_url": "https://api.mistral.ai",
         "capabilities": ProviderCapabilities(True, True, True, False, False, True),
     },
     "cohere": {
         "label": "Cohere",
         "models": ["command-a-03-2025", "command-r-plus"],
-        "default_base_url": "",
+        "default_base_url": "https://api.cohere.com",
         "capabilities": ProviderCapabilities(False, True, True, False, False, True),
     },
     "xai": {
@@ -80,6 +82,29 @@ PROVIDER_SPECS: Dict[str, Dict[str, object]] = {
         "capabilities": ProviderCapabilities(False, True, True, False, True, True),
     },
 }
+
+
+def _post_json(url: str, payload: dict, headers: Dict[str, str], timeout: int = 45) -> dict:
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    if not raw:
+        return {}
+    return json.loads(raw)
+
+
+def _messages_to_plain_text(messages: List[dict]) -> str:
+    lines: List[str] = []
+    for message in messages:
+        role = str(message.get("role", "user")).upper()
+        content = str(message.get("content", ""))
+        lines.append(f"{role}: {content}")
+    return "\n\n".join(lines)
 
 
 class ProviderAdapter:
@@ -105,8 +130,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         return response.output_text
 
 
-class ChatCompletionsCompatAdapter(ProviderAdapter):
-    """Adapter for providers exposed via OpenAI-compatible chat completions endpoints."""
+class OpenAICompatibleAdapter(ProviderAdapter):
+    """Adapter for providers with OpenAI-compatible endpoints (xAI/DeepSeek/self-hosted)."""
 
     def generate_response(self, messages: List[dict], use_web_search: bool) -> str:
         if not self.config.base_url:
@@ -121,6 +146,99 @@ class ChatCompletionsCompatAdapter(ProviderAdapter):
             max_tokens=self.config.max_tokens,
         )
         return completion.choices[0].message.content or ""
+
+
+class AnthropicAdapter(ProviderAdapter):
+    def generate_response(self, messages: List[dict], use_web_search: bool) -> str:
+        base = self.config.base_url or provider_default_base_url("anthropic")
+        payload = {
+            "model": self.config.model_name,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "messages": [{"role": "user", "content": _messages_to_plain_text(messages)}],
+        }
+        response = _post_json(
+            url=f"{base.rstrip('/')}/v1/messages",
+            payload=payload,
+            headers={
+                "x-api-key": self.config.api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+        content = response.get("content", [])
+        if not content:
+            return ""
+        first = content[0] if isinstance(content, list) else {}
+        return str(first.get("text", ""))
+
+
+class GeminiAdapter(ProviderAdapter):
+    def generate_response(self, messages: List[dict], use_web_search: bool) -> str:
+        base = self.config.base_url or provider_default_base_url("google")
+        payload = {
+            "generationConfig": {
+                "temperature": self.config.temperature,
+                "maxOutputTokens": self.config.max_tokens,
+            },
+            "contents": [{"role": "user", "parts": [{"text": _messages_to_plain_text(messages)}]}],
+        }
+        response = _post_json(
+            url=(
+                f"{base.rstrip('/')}/v1beta/models/{self.config.model_name}:generateContent"
+                f"?key={self.config.api_key}"
+            ),
+            payload=payload,
+            headers={},
+        )
+        candidates = response.get("candidates", [])
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if not parts:
+            return ""
+        return str(parts[0].get("text", ""))
+
+
+class CohereAdapter(ProviderAdapter):
+    def generate_response(self, messages: List[dict], use_web_search: bool) -> str:
+        base = self.config.base_url or provider_default_base_url("cohere")
+        payload = {
+            "model": self.config.model_name,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "messages": [{"role": "user", "content": _messages_to_plain_text(messages)}],
+        }
+        response = _post_json(
+            url=f"{base.rstrip('/')}/v2/chat",
+            payload=payload,
+            headers={"Authorization": f"Bearer {self.config.api_key}"},
+        )
+        message = response.get("message", {})
+        content = message.get("content", [])
+        if not content:
+            return ""
+        first = content[0] if isinstance(content, list) else {}
+        return str(first.get("text", ""))
+
+
+class MistralAdapter(ProviderAdapter):
+    def generate_response(self, messages: List[dict], use_web_search: bool) -> str:
+        base = self.config.base_url or provider_default_base_url("mistral")
+        payload = {
+            "model": self.config.model_name,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        response = _post_json(
+            url=f"{base.rstrip('/')}/v1/chat/completions",
+            payload=payload,
+            headers={"Authorization": f"Bearer {self.config.api_key}"},
+        )
+        choices = response.get("choices", [])
+        if not choices:
+            return ""
+        return str(choices[0].get("message", {}).get("content", ""))
 
 
 def provider_capabilities(provider_name: str) -> ProviderCapabilities:
@@ -156,4 +274,12 @@ def env_api_key(provider_name: str) -> str:
 def build_adapter(config: LLMProviderConfig) -> ProviderAdapter:
     if config.provider_name == "openai":
         return OpenAIResponsesAdapter(config)
-    return ChatCompletionsCompatAdapter(config)
+    if config.provider_name == "anthropic":
+        return AnthropicAdapter(config)
+    if config.provider_name == "google":
+        return GeminiAdapter(config)
+    if config.provider_name == "cohere":
+        return CohereAdapter(config)
+    if config.provider_name == "mistral":
+        return MistralAdapter(config)
+    return OpenAICompatibleAdapter(config)
