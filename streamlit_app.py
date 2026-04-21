@@ -77,37 +77,85 @@ def _render_llm_settings() -> Dict[str, object]:
             format_func=provider_label,
             key="llm_provider_name",
         )
+
+        provider_state = st.session_state.setdefault("llm_provider_configs", {})
+        provider_config = dict(
+            provider_state.get(
+                provider_name,
+                {
+                    "model_name": provider_models(provider_name)[0],
+                    "api_key": env_api_key(provider_name),
+                    "base_url": provider_default_base_url(provider_name),
+                    "temperature": 0.2,
+                    "max_tokens": 1200,
+                    "reasoning_mode": "medium",
+                    "enable_tools": True,
+                    "enable_web_search": True,
+                },
+            )
+        )
+
         models = provider_models(provider_name)
-        current_model = str(st.session_state.get("llm_model_name", models[0]))
+        current_model = str(provider_config.get("model_name", models[0]))
         if current_model not in models:
             current_model = models[0]
         model_name = st.selectbox(
             "Model",
             options=models,
             index=models.index(current_model),
-            key="llm_model_name",
+            key=f"llm_model_name_{provider_name}",
         )
 
-        default_api_key = env_api_key(provider_name)
         api_key_value = st.text_input(
             f"{provider_label(provider_name)} API Key",
-            value=st.session_state.get("llm_api_key", default_api_key),
+            value=str(provider_config.get("api_key", "")),
             type="password",
             placeholder="Enter API key",
             help="Entered key is stored in current session environment only.",
-            key="llm_api_key",
+            key=f"llm_api_key_{provider_name}",
         )
         base_url = st.text_input(
             "Base URL (optional)",
-            value=st.session_state.get("llm_base_url", provider_default_base_url(provider_name)),
+            value=str(provider_config.get("base_url", provider_default_base_url(provider_name))),
             placeholder="https://...",
-            key="llm_base_url",
+            key=f"llm_base_url_{provider_name}",
         )
-        temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1, key="llm_temperature")
-        max_tokens = st.number_input("Max Tokens", min_value=128, max_value=8192, value=1200, step=128, key="llm_max_tokens")
-        reasoning_mode = st.selectbox("Reasoning Mode", options=["low", "medium", "high"], index=1, key="llm_reasoning_mode")
-        enable_tools = st.checkbox("Enable Tool Calls", value=True, key="llm_enable_tools")
-        enable_web_search = st.checkbox("Enable Web Search (if supported)", value=True, key="llm_enable_web_search")
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.5,
+            value=float(provider_config.get("temperature", 0.2)),
+            step=0.1,
+            key=f"llm_temperature_{provider_name}",
+        )
+        max_tokens = st.number_input(
+            "Max Tokens",
+            min_value=128,
+            max_value=8192,
+            value=int(provider_config.get("max_tokens", 1200)),
+            step=128,
+            key=f"llm_max_tokens_{provider_name}",
+        )
+        reasoning_mode = st.selectbox(
+            "Reasoning Mode",
+            options=["low", "medium", "high"],
+            index=(
+                ["low", "medium", "high"].index(str(provider_config.get("reasoning_mode", "medium")))
+                if str(provider_config.get("reasoning_mode", "medium")) in {"low", "medium", "high"}
+                else 1
+            ),
+            key=f"llm_reasoning_mode_{provider_name}",
+        )
+        enable_tools = st.checkbox(
+            "Enable Tool Calls",
+            value=bool(provider_config.get("enable_tools", True)),
+            key=f"llm_enable_tools_{provider_name}",
+        )
+        enable_web_search = st.checkbox(
+            "Enable Web Search (if supported)",
+            value=bool(provider_config.get("enable_web_search", True)),
+            key=f"llm_enable_web_search_{provider_name}",
+        )
 
         caps = provider_capabilities(provider_name)
         st.caption(
@@ -120,8 +168,7 @@ def _render_llm_settings() -> Dict[str, object]:
             f"streaming={'✅' if caps.streaming else '—'}"
         )
 
-    return {
-        "provider_name": provider_name,
+    provider_state[provider_name] = {
         "model_name": model_name,
         "api_key": api_key_value.strip(),
         "base_url": base_url.strip(),
@@ -130,6 +177,12 @@ def _render_llm_settings() -> Dict[str, object]:
         "reasoning_mode": reasoning_mode,
         "enable_tools": bool(enable_tools),
         "enable_web_search": bool(enable_web_search),
+    }
+    st.session_state["llm_provider_configs"] = provider_state
+
+    return {
+        "provider_name": provider_name,
+        **provider_state[provider_name],
     }
 
 
