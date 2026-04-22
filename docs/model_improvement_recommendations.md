@@ -1,30 +1,150 @@
-# Solar Farm Financial Model – Improvement Recommendations
+# Senior Financial Review – Solar Farm Model (Current State)
 
-This note summarizes the main areas where the deterministic engine and the Streamlit tooling can be strengthened to increase analytical robustness, traceability, and IFRS alignment.
+## Executive assessment
+The model has improved materially and now includes stronger lender-style outputs (`CFADS`, `DSCR`, `capex_per_mw`, `opex_per_mwh`, and an LCOE proxy). It is now useful for first-pass project-finance screening. However, it still needs several structural upgrades to be fully investment-committee grade for utility-scale solar.
 
-## 1. Strengthen automated regression coverage
-- **Why:** The core simulator orchestrates multiple dependent schedules – generation, revenue, operating costs, capex, working capital, taxes, debt, and terminal value – before aggregating them into IFRS-style statements.【F:solar_farm_financial_model/model.py†L115-L183】【F:solar_farm_financial_model/model.py†L480-L499】 Without automated tests, small refactors in any sub-schedule can silently break cash flows or statement roll-ups.
-- **Recommendation:** Introduce a `tests/` suite (e.g., with `pytest`) that feeds curated assumption fixtures through `SolarFarmFinancialModel.run()` and asserts:
-  - Income statement subtotals (revenue, EBITDA, EBIT) reconcile to the monthly drivers.
-  - Cash flow totals tie back to the balance sheet movements and working-capital deltas.
-  - Key metrics (NPV, IRR, payback) remain stable for the canonical workbook.  This provides a regression net before changing depreciation logic or adding new assumptions.
+## What is now working well
 
-## 2. Guard against duplicate operating-expense labels
-- **Observation:** Operating expense columns are keyed by a lower-cased label (`opex_fixed_<slug>` / `opex_variable_<slug>`).【F:solar_farm_financial_model/model.py†L251-L277】 If two inputs share the same label (e.g., two “Maintenance” rows), later iterations overwrite earlier data, leading to understated costs.
-- **Recommendation:** Normalise column names with a deterministic unique suffix (e.g., append an index) or store results in a MultiIndex keyed by both label and UUID. Also surface validation in the Streamlit input table to flag duplicate names before the model runs.
+1. **Debt service analytics are embedded**
+   - Monthly `debt_service`, `cfads`, and `dscr` are calculated in-core, and annual DSCR is surfaced in annual summary outputs.
 
-## 3. Expand terminal-value flexibility
-- **Observation:** The exit cash flow is currently calculated with a single trailing EBITDA multiple minus capital-gains tax and outstanding debt.【F:solar_farm_financial_model/model.py†L451-L459】 Real projects often require:
-  - Alternative valuation methods (DCF of a terminal growth perpetuity, book-value-based exits).
-  - Explicit salvage / decommissioning costs and working-capital releases at exit.
-- **Recommendation:** Extend the global assumptions schema to let users pick the terminal methodology, specify salvage costs, and opt-in to releasing working capital. This will make the exit treatment more transparent and adaptable to different mandates.
+2. **Core efficiency and cost diagnostics exist**
+   - `capex_per_mw`, `opex_per_mwh`, and `lcoe_proxy_per_mwh` are now reported, which improves benchmarkability and technical-economic review.
 
-## 4. Enhance working-capital modelling fidelity
-- **Observation:** Working-capital balances scale linearly with total opex, even for receivables where revenue is the more appropriate driver.【F:solar_farm_financial_model/model.py†L327-L389】 Inventory and payables also assume a single blended opex base.
-- **Recommendation:** Allow the assumption tables to map each working-capital component to a driver (revenue, variable opex, fixed opex, or energy). This improves accuracy for hybrid business models (e.g., when inventory is tied to merchant sales) and keeps the IFRS balance sheet closer to operational reality.
+3. **Revenue-share validation added**
+   - The model now blocks invalid over-allocation of PPA + merchant shares above 100%.
 
-## 5. Improve dependency handling ergonomics
-- **Observation:** Optional imports are guarded in the loaders, but the CLI still surfaces environment-specific guidance when numpy/pandas are missing.【F:solar_farm_financial_model/data_loader.py†L9-L37】【F:solar_farm_financial_model/cli.py†L1-L120】 Users deploying on Streamlit Cloud or Airflow benefit from clearer documentation.
-- **Recommendation:** Ship a `pyproject.toml` or extras section that defines core vs. optional dependencies, and document minimal packages required for headless execution. Pair this with a lightweight smoke test in CI that exercises both the CLI and the Streamlit app in dependency-constrained environments.
+## Key gaps to prioritize (high impact)
 
-Implementing the above will make the model easier to extend, safer to refactor, and more resilient when different stakeholders contribute custom assumptions.
+### 1) Add explicit equity funding schedule and waterfall
+Current equity cash flow still behaves as a residual debt-free cash-flow proxy. Add:
+- construction-period equity draws,
+- operating-period distributions,
+- preferred return/hurdle logic (if applicable),
+- investor/owner waterfall (including catch-up tiers if needed).
+
+**Why this matters:** IRR and equity multiple become economically valid and auditable.
+
+### 2) Upgrade debt module to full project-finance covenant quality
+Add:
+- LLCR/PLCR,
+- DSRA mechanics,
+- sculpted amortization against CFADS,
+- covenant default triggers and cure assumptions.
+
+**Why this matters:** lenders and ICs evaluate downside resilience through these metrics, not DSCR alone.
+
+### 3) Replace simplified tax treatment with jurisdiction-grade tax stack
+Add:
+- ITC/PTC pathways,
+- MACRS/bonus depreciation,
+- tax-equity transferability/partnership allocations (if relevant),
+- NOL handling and carryforward logic.
+
+**Why this matters:** post-tax equity returns can change materially and often determine deal viability.
+
+### 4) Improve merchant and contract realism
+Add:
+- PPA tenor roll-off,
+- merchant curve by year (not only constant escalation),
+- optional curtailment and availability assumptions,
+- degradation-performance warranty interactions.
+
+**Why this matters:** valuation and debt sizing are highly sensitive to post-PPA cash-flow quality.
+
+### 5) Strengthen terminal valuation architecture
+Add selectable methods:
+- exit multiple,
+- Gordon-growth using terminal growth,
+- salvage/decommissioning netting,
+- explicit working-capital release at exit.
+
+**Why this matters:** terminal value often drives long-horizon project NPV and must be method-transparent.
+
+### 6) Improve CAPEX realism and lifecycle modeling
+Add:
+- construction schedule by package and contingency draw rules,
+- owner’s costs, IDC and financing fees,
+- lifecycle replacement CAPEX (especially inverters),
+- degradation-linked augmentation where relevant.
+
+**Why this matters:** under-modeled lifecycle CAPEX overstates long-term equity value.
+
+### 7) Introduce probabilistic downside diagnostics for IC discussion
+Keep deterministic base case, but add:
+- P50/P90 generation cases,
+- downside merchant-price cases,
+- debt covenant breach probability snapshots.
+
+**Why this matters:** decision-makers need distributional risk insight, not only base/upside/downside points.
+
+### 8) Add full traceability outputs for auditability
+Produce dedicated schedule tabs/dataframes for:
+- Sources & Uses,
+- Debt covenant table,
+- Tax bridge,
+- Return bridge (NPV/IRR drivers),
+- Reconciliation checks.
+
+**Why this matters:** traceability is critical for credit committee and investor diligence confidence.
+
+## Recommended implementation sequence (practical)
+1. **Equity funding + waterfall + sources/uses reconciliation**
+2. **Debt covenant stack (LLCR/PLCR/DSRA/sculpting)**
+3. **Tax and incentives module**
+4. **Contract/merchant curve realism + curtailment**
+5. **Terminal valuation methods + decommissioning and WC release**
+6. **Probabilistic risk pack (P50/P90 + covenant risk)**
+
+If executed in this order, the model can move from “good screening tool” to “investment-committee and lender-ready underwriting model.”
+
+## Additional bankability recommendations (senior lender perspective)
+
+To move from technically improved to truly financeable in debt markets, add the following lender controls and deliverables:
+
+1. **Base/Downside covenant case pack**
+   - Mandatory base case + lender downside case with explicit DSCR lock-up, default, and cure paths.
+   - Include minimum DSCR by year, average DSCR, and debt tail profile in each case.
+
+2. **Debt term-sheet switchboard**
+   - Parameterize common debt terms: margin grids, commitment/arrangement fees, amortization type, DSRA rules, prepayment assumptions, and cash sweep triggers.
+   - Allow side-by-side debt structure comparison for bank club vs. institutional debt.
+
+3. **Construction-to-operation transition controls**
+   - Add COD tests, liquidated damages assumptions, delay scenarios, and EPC warranty logic.
+   - Include contingency draw waterfall and residual contingency release rules.
+
+4. **Operating reserve framework**
+   - Distinguish DSRA, major maintenance reserve, and inverter reserve.
+   - Track reserve funding and release logic with auditable cash-account rollforwards.
+
+5. **Independent engineer alignment outputs**
+   - Add P50/P75/P90 generation and availability assumptions with clear mapping to energy model inputs.
+   - Provide a reconciliation table from technical assumptions to financial energy outcomes.
+
+6. **Merchant risk and hedge module**
+   - Add hedge/floor structures, basis risk assumptions, and shaping losses.
+   - Include post-PPA merchant tail valuation under conservative and stressed curves.
+
+7. **Counterparty and legal risk overlay**
+   - PPA off-taker quality scoring, curtailment compensation rules, termination provisions, and change-in-law sensitivity.
+   - Flag where legal protections are assumed but not modeled economically.
+
+8. **IC-ready outputs and audit package**
+   - One-click package with: assumptions memo, covenant dashboard, downside bridge, return attribution bridge, and reconciliation checks.
+   - Ensure all key outputs are traceable back to assumptions and intermediate schedules.
+
+These additions are typically what convert a strong internal model into a lender- and credit-committee-acceptable underwriting model.
+
+## 8-point implementation verification checklist (current build)
+
+1. **Equity funding + waterfall** – Implemented in core cash-flow plumbing (`equity_contribution`, reserve-adjusted distributions, and resulting `equity_cash_flow`).  
+2. **Covenant-grade debt stack** – Implemented at proxy level (`CFADS`, `DSCR`, DSRA requirement/change, LLCR/PLCR proxies, covenant breach count).  
+3. **Tax/incentive treatment** – Implemented baseline modules (optional bonus depreciation and ITC realization timing).  
+4. **Contract/merchant realism** – Implemented baseline controls (curtailment, PPA-term roll-off, merchant floor price, counterparty haircut).  
+5. **Terminal valuation architecture** – Implemented selectable terminal method (`multiple` / `gordon`).  
+6. **Lifecycle CAPEX realism** – Implemented optional replacement-year/fraction lifecycle CAPEX schedule.  
+7. **Probabilistic downside diagnostics** – Implemented downside NPV distribution with P10/P50/P90 plus P50/P75/P90 energy diagnostics.  
+8. **Traceability/reconciliation schedules** – Implemented monthly/annual sources-uses and reserve/fee schedules with reconciliation gap output.
+
+> Note: Items above are implemented to materially improve bankability, but some components are intentionally proxy-level (especially covenant architecture and tax depth) and should be hardened further for full lender model compliance.

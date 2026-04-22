@@ -3,18 +3,37 @@
 from __future__ import annotations
 
 import copy
+import io
+import html
 import math
+import os
+import re
 import tempfile
 import uuid
 from datetime import date
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from solar_farm_financial_model.data_loader import load_assumptions
+from solar_farm_financial_model.ai import ConversationMemory, run_assistant_turn
+from solar_farm_financial_model.ai.providers import (
+    PROVIDER_SPECS,
+    env_api_key,
+    provider_capabilities,
+    provider_default_base_url,
+    provider_label,
+    provider_models,
+)
 from solar_farm_financial_model.model import (
     ModelOutputs,
     SolarFarmFinancialModel,
@@ -43,11 +62,155 @@ MetricLabels = {
 }
 
 
+def _render_llm_settings() -> Dict[str, object]:
+    """Render provider-agnostic LLM settings and return active config."""
+    with st.expander("LLM Settings", expanded=False):
+        provider_options = list(PROVIDER_SPECS.keys())
+        current_provider = str(st.session_state.get("llm_provider_name", "openai"))
+        if current_provider not in provider_options:
+            current_provider = "openai"
+
+        provider_name = st.selectbox(
+            "Provider",
+            options=provider_options,
+            index=provider_options.index(current_provider),
+            format_func=provider_label,
+            key="llm_provider_name",
+        )
+
+        provider_state = st.session_state.setdefault("llm_provider_configs", {})
+        provider_config = dict(
+            provider_state.get(
+                provider_name,
+                {
+                    "model_name": provider_models(provider_name)[0],
+                    "api_key": env_api_key(provider_name),
+                    "base_url": provider_default_base_url(provider_name),
+                    "temperature": 0.2,
+                    "max_tokens": 1200,
+                    "reasoning_mode": "medium",
+                    "enable_tools": True,
+                    "enable_web_search": True,
+                },
+            )
+        )
+
+        models = provider_models(provider_name)
+        current_model = str(provider_config.get("model_name", models[0]))
+        if current_model not in models:
+            current_model = models[0]
+        model_name = st.selectbox(
+            "Model",
+            options=models,
+            index=models.index(current_model),
+            key=f"llm_model_name_{provider_name}",
+        )
+
+        api_key_value = st.text_input(
+            f"{provider_label(provider_name)} API Key",
+            value=str(provider_config.get("api_key", "")),
+            type="password",
+            placeholder="Enter API key",
+            help="Entered key is stored in current session environment only.",
+            key=f"llm_api_key_{provider_name}",
+        )
+        base_url = st.text_input(
+            "Base URL (optional)",
+            value=str(provider_config.get("base_url", provider_default_base_url(provider_name))),
+            placeholder="https://...",
+            key=f"llm_base_url_{provider_name}",
+        )
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.5,
+            value=float(provider_config.get("temperature", 0.2)),
+            step=0.1,
+            key=f"llm_temperature_{provider_name}",
+        )
+        max_tokens = st.number_input(
+            "Max Tokens",
+            min_value=128,
+            max_value=8192,
+            value=int(provider_config.get("max_tokens", 1200)),
+            step=128,
+            key=f"llm_max_tokens_{provider_name}",
+        )
+        reasoning_mode = st.selectbox(
+            "Reasoning Mode",
+            options=["low", "medium", "high"],
+            index=(
+                ["low", "medium", "high"].index(str(provider_config.get("reasoning_mode", "medium")))
+                if str(provider_config.get("reasoning_mode", "medium")) in {"low", "medium", "high"}
+                else 1
+            ),
+            key=f"llm_reasoning_mode_{provider_name}",
+        )
+        enable_tools = st.checkbox(
+            "Enable Tool Calls",
+            value=bool(provider_config.get("enable_tools", True)),
+            key=f"llm_enable_tools_{provider_name}",
+        )
+        enable_web_search = st.checkbox(
+            "Enable Web Search (if supported)",
+            value=bool(provider_config.get("enable_web_search", True)),
+            key=f"llm_enable_web_search_{provider_name}",
+        )
+
+        caps = provider_capabilities(provider_name)
+        st.caption(
+            "Capabilities: "
+            f"reasoning={'✅' if caps.reasoning else '—'}, "
+            f"long_context={'✅' if caps.long_context else '—'}, "
+            f"tool_use={'✅' if caps.tool_use else '—'}, "
+            f"web_search={'✅' if caps.web_search else '—'}, "
+            f"vision={'✅' if caps.vision else '—'}, "
+            f"streaming={'✅' if caps.streaming else '—'}"
+        )
+
+    provider_state[provider_name] = {
+        "model_name": model_name,
+        "api_key": api_key_value.strip(),
+        "base_url": base_url.strip(),
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "reasoning_mode": reasoning_mode,
+        "enable_tools": bool(enable_tools),
+        "enable_web_search": bool(enable_web_search),
+    }
+    st.session_state["llm_provider_configs"] = provider_state
+
+    return {
+        "provider_name": provider_name,
+        **provider_state[provider_name],
+    }
+
+
+def _configure_llm_secrets() -> None:
+    """Load provider API keys from Streamlit secrets when available."""
+    secret_keys = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY",
+        "COHERE_API_KEY",
+        "XAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "LLAMA_API_KEY",
+    ]
+    for key in secret_keys:
+        if os.environ.get(key):
+            continue
+        secret_value = st.secrets.get(key, "")
+        if secret_value:
+            os.environ[key] = str(secret_value)
+
+
 @st.cache_data(show_spinner=False)
 def _run_model(
     excel_bytes: bytes | None,
     override_items: Tuple[Tuple[str, float | bool], ...],
-    seasonality_rows: Tuple[Tuple[str, float], ...],
+    monthly_generation_rows: Tuple[Tuple[str, float], ...],
     labour_rows: Tuple[Tuple[object, ...], ...],
     initial_investment_rows: Tuple[Tuple[object, ...], ...],
     cost_rows: Tuple[Tuple[object, ...], ...],
@@ -62,7 +225,7 @@ def _run_model(
     """Execute the financial model with optional overrides and return outputs."""
 
     overrides = dict(override_items)
-    seasonality_list = _rows_from_tuple(seasonality_rows, ("month", "share"))
+    monthly_generation_list = _rows_from_tuple(monthly_generation_rows, ("month", "expected_mwh"))
     labour_list = _rows_from_tuple(labour_rows, ("role", "annual_cost"))
     initial_investment_list = _rows_from_tuple(
         initial_investment_rows,
@@ -140,12 +303,26 @@ def _run_model(
     energy.capacity_factor = float(overrides["capacity_factor"])
     energy.degradation_rate = float(overrides["degradation_rate"])
     energy.annual_hours = max(0, int(round(float(overrides["annual_hours"]))))
+    energy.panel_count = max(0.0, float(overrides["panel_count"]))
+    energy.panel_watt_dc = max(0.0, float(overrides["panel_watt_dc"]))
+    energy.panel_unit_cost = max(0.0, float(overrides["panel_unit_cost"]))
+    energy.dc_ac_ratio = max(0.1, float(overrides["dc_ac_ratio"]))
 
-    if seasonality_list:
-        raw_shares: List[float] = [max(0.0, _coerce_float(row.get("share"))) for row in seasonality_list]
-        total = sum(raw_shares)
-        if total > 0 and len(raw_shares) == 12:
-            energy.seasonality = [value / total for value in raw_shares]
+    monthly_values: List[float] = []
+    if monthly_generation_list:
+        monthly_values = [
+            max(0.0, _coerce_float(row.get("expected_mwh")))
+            for row in monthly_generation_list
+        ]
+
+    if len(monthly_values) == 12:
+        energy.energy_model_mode = "monthly_expected_mwh"
+        energy.monthly_expected_mwh = monthly_values
+    else:
+        energy.energy_model_mode = "share_based"
+
+    energy.annual_production_growth_rate = float(overrides["annual_production_growth_rate"])
+    energy.monthly_min_mwh = float(overrides["monthly_min_mwh"])
 
     revenue = assumptions.revenue
     ppa_share = float(overrides["ppa_share"])
@@ -307,6 +484,985 @@ def _format_metric(name: str, value: float) -> str:
 
 def _downloadable_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=True).encode("utf-8")
+
+
+QUESTION_TYPE_QUERIES: Dict[str, str] = {
+    "valuation": "utility scale solar project valuation EV EBITDA IRR benchmark",
+    "profitability": "utility scale solar project EBITDA margin benchmark",
+    "liquidity": "project finance solar DSCR minimum benchmark",
+    "leverage": "project finance debt service coverage ratio covenant utility scale solar",
+    "growth": "utility scale solar revenue growth benchmark power price escalation",
+    "pricing": "US utility scale solar PPA price benchmark",
+    "efficiency": "utility scale solar capacity factor benchmark United States",
+    "risk": "utility scale solar project risk benchmark debt sizing",
+}
+
+
+BENCHMARK_REFERENCE_RANGES: Dict[str, Dict[str, str]] = {
+    "valuation": {"equity_irr": "~8%–12% (contracted) / 12%–18% (merchant-heavy)"},
+    "profitability": {"ebitda_margin": "~55%–85% for mature generation assets"},
+    "liquidity": {"dscr": ">=1.20x base case, >=1.00x downside"},
+    "leverage": {"debt_to_ebitda": "~4.0x–7.0x project-finance range"},
+    "growth": {"annual_escalation": "~1%–3% contracted escalation"},
+    "pricing": {"ppa_price_usd_per_mwh": "region-dependent; commonly benchmarked vs local ISO/utility data"},
+    "efficiency": {"capacity_factor": "~18%–30% utility-scale PV (resource-dependent)"},
+    "risk": {"discount_rate": "~6%–10% contracted, higher for merchant exposure"},
+}
+
+
+def _classify_question_type(question: str) -> str:
+    text = question.lower()
+    keyword_map = {
+        "valuation": ["valuation", "multiple", "ev", "irr", "npv", "moic"],
+        "profitability": ["profit", "margin", "ebitda", "net income"],
+        "liquidity": ["liquidity", "runway", "cash", "working capital"],
+        "leverage": ["debt", "leverage", "dscr", "covenant", "coverage"],
+        "growth": ["growth", "expansion", "increase", "trend"],
+        "pricing": ["price", "ppa", "tariff", "merchant"],
+        "efficiency": ["capacity factor", "efficiency", "utilization", "output"],
+        "risk": ["risk", "stress", "downside", "volatility", "sensitivity"],
+    }
+    for question_type, words in keyword_map.items():
+        if any(word in text for word in words):
+            return question_type
+    return "valuation"
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _web_search_benchmarks(query: str, max_results: int = 4) -> List[Dict[str, str]]:
+    """Simple web search via DuckDuckGo HTML endpoint."""
+
+    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+    req = Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=12) as response:
+        html_text = response.read().decode("utf-8", errors="ignore")
+
+    pattern = re.compile(r'class="result__a" href="(.*?)".*?>(.*?)</a>', re.DOTALL)
+    results: List[Dict[str, str]] = []
+    for match in pattern.finditer(html_text):
+        if len(results) >= max_results:
+            break
+        url = html.unescape(match.group(1))
+        title = re.sub(r"<.*?>", "", html.unescape(match.group(2))).strip()
+        if url and title:
+            results.append({"title": title, "url": url})
+    return results
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator is None or not np.isfinite(denominator) or abs(denominator) < 1e-12:
+        return float("nan")
+    return numerator / denominator
+
+
+def _internal_model_summary(outputs: ModelOutputs, assumptions: Assumptions) -> Dict[str, float]:
+    monthly = outputs.monthly_results
+    annual = outputs.annual_summary
+    latest_year = annual.iloc[-1] if not annual.empty else pd.Series(dtype=float)
+    first_year = annual.iloc[0] if not annual.empty else pd.Series(dtype=float)
+
+    revenue = float(latest_year.get("revenue_total", float("nan")))
+    ebitda = float(latest_year.get("ebitda", float("nan")))
+    net_income = float(latest_year.get("net_income", float("nan")))
+    debt_balance = float(monthly.get("debt_balance", pd.Series([0.0])).iloc[-1])
+    annual_debt_service = float(latest_year.get("debt_interest", 0.0) + latest_year.get("debt_principal", 0.0))
+    if "dscr" in monthly.columns:
+        dscr_series = monthly["dscr"].replace([np.inf, -np.inf], np.nan).dropna()
+        dscr = float(dscr_series.mean()) if not dscr_series.empty else float("nan")
+    else:
+        dscr = _safe_ratio(float(latest_year.get("cfads", float("nan"))), annual_debt_service) if annual_debt_service else float("nan")
+
+    annual_energy = float(monthly["energy_mwh"].sum()) / max(1.0, assumptions.global_assumptions.forecast_months / 12.0)
+    total_capex = float(sum(item.amount for item in assumptions.capex_items))
+    total_fixed_opex = float(sum(getattr(item, "annual_cost", 0.0) for item in assumptions.fixed_opex))
+    weighted_variable_opex = float(sum(item.cost_per_mwh for item in assumptions.variable_opex))
+    lcoe_proxy = _safe_ratio(total_fixed_opex + annual_energy * weighted_variable_opex, annual_energy) if annual_energy else float("nan")
+
+    return {
+        "project_npv": float(outputs.metrics.get("project_npv", float("nan"))),
+        "project_irr": float(outputs.metrics.get("project_irr", float("nan"))),
+        "equity_irr": float(outputs.metrics.get("equity_irr", float("nan"))),
+        "investor_irr": float(outputs.metrics.get("investor_irr", float("nan"))),
+        "revenue": revenue,
+        "revenue_year_1": float(first_year.get("revenue_total", float("nan"))),
+        "ebitda": ebitda,
+        "net_income": net_income,
+        "ebitda_margin": _safe_ratio(ebitda, revenue) if revenue else float("nan"),
+        "debt_balance": debt_balance,
+        "debt_to_ebitda": _safe_ratio(debt_balance, ebitda) if ebitda else float("nan"),
+        "dscr_proxy": dscr,
+        "capex_total": total_capex,
+        "capex_per_mw": _safe_ratio(total_capex, assumptions.energy.capacity_mw),
+        "opex_per_mw": _safe_ratio(total_fixed_opex, assumptions.energy.capacity_mw),
+        "opex_per_mwh": weighted_variable_opex,
+        "lcoe_proxy": lcoe_proxy,
+        "ppa_rate": float(assumptions.revenue.ppa.rate_curve.initial),
+        "merchant_rate": float(assumptions.revenue.merchant.rate_curve.initial),
+        "capacity_factor": float(assumptions.energy.capacity_factor),
+        "capacity_mw": float(assumptions.energy.capacity_mw),
+        "discount_rate": float(assumptions.global_assumptions.discount_rate),
+        "exit_multiple": float(assumptions.global_assumptions.exit_multiple),
+    }
+
+
+def _build_structured_ai_response(
+    question: str,
+    model_data: Dict[str, float],
+    benchmark_range: Dict[str, str],
+    sources: List[Dict[str, str]],
+    question_type: str,
+    prior_messages: List[Dict[str, str]],
+) -> str:
+    """Generate a structured, auditable response grounded in model + benchmark context."""
+
+    status = "conservative"
+    if pd.notna(model_data.get("project_npv")) and model_data.get("project_npv", 0.0) < 0:
+        status = "high-risk"
+    if pd.notna(model_data.get("equity_irr")) and model_data.get("equity_irr", 0.0) > 0.15:
+        status = "aggressive upside"
+
+    memory_note = (
+        f"Using {len(prior_messages)} prior exchanges to maintain continuity."
+        if prior_messages
+        else "No prior chat context yet in this session."
+    )
+
+    sources_md = "\n".join([f"- {s['title']}: {s['url']}" for s in sources]) or "- No live benchmark sources retrieved."
+    benchmark_md = "\n".join([f"- {k.replace('_', ' ').title()}: {v}" for k, v in benchmark_range.items()]) or "- No benchmark range mapping for this question type."
+
+    return (
+        "### 1) Direct answer\n"
+        f"This is a **{question_type}** question; the current model looks **{status}** after combining internal outputs with benchmark context.\n\n"
+        "### 2) Internal model insight\n"
+        f"- Project NPV: `{model_data['project_npv']:,.0f}`\n"
+        f"- Project IRR / Equity IRR / Investor IRR: `{model_data['project_irr']:.2%}` / `{model_data['equity_irr']:.2%}` / `{model_data['investor_irr']:.2%}`\n"
+        f"- Revenue (Y1 → latest): `{model_data['revenue_year_1']:,.0f}` → `{model_data['revenue']:,.0f}`\n"
+        f"- EBITDA margin: `{model_data['ebitda_margin']:.2%}`\n"
+        f"- Debt/EBITDA (proxy): `{model_data['debt_to_ebitda']:.2f}x` and DSCR proxy `{model_data['dscr_proxy']:.2f}x`\n"
+        f"- CAPEX total / CAPEX per MW: `{model_data['capex_total']:,.0f}` / `{model_data['capex_per_mw']:,.0f}`\n"
+        f"- OPEX per MW / OPEX per MWh: `{model_data['opex_per_mw']:,.0f}` / `{model_data['opex_per_mwh']:,.2f}`\n"
+        f"- LCOE proxy: `{model_data['lcoe_proxy']:,.2f}` per MWh\n"
+        f"- Capacity factor, PPA rate, merchant rate: `{model_data['capacity_factor']:.2%}`, `{model_data['ppa_rate']:,.2f}`, `{model_data['merchant_rate']:,.2f}`\n\n"
+        "### 3) External benchmark comparison\n"
+        f"{benchmark_md}\n\n"
+        "### 4) Interpretation\n"
+        f"- Relative status assessment: **{status}**.\n"
+        "- Guardrails: distinguish model facts above from benchmark assumptions below.\n"
+        f"- Context continuity: {memory_note}\n"
+        "- If benchmark evidence is weak, treat conclusions as directional and validate with transaction-specific comps.\n\n"
+        "### 5) Recommendation\n"
+        "- Stress-test the highest-sensitivity assumptions for this topic (pricing, capacity factor, opex, debt terms).\n"
+        "- Validate CAPEX/OPEX and return assumptions against one contracted case and one merchant-downside case.\n"
+        "- If DSCR proxy or return metrics fall outside target ranges, rebalance leverage and commercial structure before IC.\n\n"
+        "### 6) Sources\n"
+        "- Internal model: current run outputs and assumptions from this session.\n"
+        "- External benchmark references:\n"
+        f"{sources_md}"
+    )
+
+
+def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptions) -> None:
+    st.header("AI Reasoning Chatbot")
+    st.caption(
+        "Model-grounded and benchmark-aware copilot for valuation, profitability, leverage, pricing, efficiency, and risk."
+    )
+    llm_config = _render_llm_settings()
+    if llm_config.get("api_key"):
+        provider = provider_label(str(llm_config.get("provider_name", "openai")))
+        model = str(llm_config.get("model_name", ""))
+        st.success(f"{provider} configured (`{model}`).")
+    else:
+        st.warning(
+            "No provider API key detected. Chatbot is running in local fallback mode. "
+            "Set a provider key in LLM Settings to enable hosted reasoning."
+        )
+
+    if "ai_chat_history" not in st.session_state:
+        st.session_state["ai_chat_history"] = []
+    if "ai_memory" not in st.session_state or not isinstance(st.session_state["ai_memory"], ConversationMemory):
+        st.session_state["ai_memory"] = ConversationMemory()
+
+    for item in st.session_state["ai_chat_history"]:
+        with st.chat_message("user"):
+            st.write(item["question"])
+        with st.chat_message("assistant"):
+            st.markdown(item["answer"])
+
+    prompt = st.chat_input("Ask about IRR, DSCR, CAPEX/MW, OPEX/MWh, valuation realism, feasibility, etc.")
+    if not prompt:
+        return
+
+    turn, memory = run_assistant_turn(
+        question=prompt,
+        outputs=outputs,
+        assumptions=assumptions,
+        memory=st.session_state["ai_memory"],
+        llm_config=llm_config,
+    )
+    st.session_state["ai_memory"] = memory
+    st.session_state["ai_chat_history"].append({"question": prompt, "answer": turn.answer_markdown})
+
+    with st.chat_message("user"):
+        st.write(prompt)
+    with st.chat_message("assistant"):
+        st.markdown(turn.answer_markdown)
+
+
+def _excel_title(ws, title: str, subtitle: str) -> None:
+    ws.merge_cells("A1:H1")
+    ws["A1"] = title
+    ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="0B3D91")
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells("A2:H2")
+    ws["A2"] = subtitle
+    ws["A2"].font = Font(size=11, color="1F2D3D", italic=True)
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[2].height = 22
+
+
+def _write_styled_table(
+    ws,
+    df: pd.DataFrame,
+    title: str,
+    start_row: int,
+    start_col: int = 1,
+) -> int:
+    """Write a styled dataframe section and return the next available row."""
+
+    section_row = start_row
+    ws.cell(row=section_row, column=start_col, value=title)
+    ws.cell(row=section_row, column=start_col).font = Font(size=13, bold=True, color="0B3D91")
+    section_row += 1
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    border = Border(
+        left=Side(style="thin", color="D9E2F3"),
+        right=Side(style="thin", color="D9E2F3"),
+        top=Side(style="thin", color="D9E2F3"),
+        bottom=Side(style="thin", color="D9E2F3"),
+    )
+
+    frame = df.copy()
+    frame = frame.replace([np.inf, -np.inf], np.nan)
+    frame = frame.where(pd.notna(frame), None)
+
+    for col_idx, column_name in enumerate(frame.columns, start=start_col):
+        cell = ws.cell(row=section_row, column=col_idx, value=str(column_name))
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    data_start = section_row + 1
+    for row_offset, values in enumerate(frame.itertuples(index=False), start=0):
+        excel_row = data_start + row_offset
+        for col_idx, value in enumerate(values, start=start_col):
+            cell = ws.cell(row=excel_row, column=col_idx, value=value)
+            cell.border = border
+            column_name = str(frame.columns[col_idx - start_col]).lower()
+            if isinstance(value, (int, float, np.floating)) and value is not None:
+                if "irr" in column_name or "rate" in column_name or "share" in column_name:
+                    cell.number_format = "0.0%"
+                elif "month" in column_name and "payback" in column_name:
+                    cell.number_format = "0"
+                else:
+                    cell.number_format = '#,##0.00;[Red]-#,##0.00'
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            if row_offset % 2 == 1:
+                cell.fill = PatternFill("solid", fgColor="F7FBFF")
+
+    last_row = data_start + max(len(frame) - 1, 0)
+    for col_idx, column_name in enumerate(frame.columns, start=start_col):
+        desired = max(14, min(34, len(str(column_name)) + 4))
+        for value in frame.iloc[:, col_idx - start_col].head(30):
+            desired = max(desired, min(34, len(str(value)) + 2))
+        ws.column_dimensions[get_column_letter(col_idx)].width = desired
+
+    return last_row + 2
+
+
+@st.cache_data(show_spinner=False)
+def _downloadable_excel(
+    outputs: ModelOutputs,
+    summary_tables: Dict[str, pd.DataFrame],
+    assumptions: Assumptions,
+) -> bytes:
+    """Create an investor-ready workbook aligned to Key Metrics, Financials, and Key Analytics tabs."""
+
+    wb = Workbook()
+
+    # ------------------------------------------------------------------
+    # Sheet 1: Key Metrics Dashboard
+    ws_metrics = wb.active
+    ws_metrics.title = "Key Metrics Dashboard"
+    _excel_title(
+        ws_metrics,
+        f"{assumptions.global_assumptions.project_name} | Key Metrics Dashboard",
+        "KPIs, drivers, and trend visuals",
+    )
+
+    metrics_df = summary_tables["metrics"].copy()
+    metrics_df["metric"] = metrics_df["metric"].map(
+        lambda m: MetricLabels.get(m, str(m).replace("_", " ").title())
+    )
+    metrics_df = metrics_df.rename(columns={"metric": "Metric", "value": "Value"})
+    row = _write_styled_table(ws_metrics, metrics_df, "KPI Snapshot", start_row=4)
+
+    kpi_chart = BarChart()
+    kpi_chart.title = "KPI Comparison"
+    kpi_chart.y_axis.title = "Value"
+    kpi_chart.width = 11
+    kpi_chart.height = 5.5
+    kpi_chart.add_data(Reference(ws_metrics, min_col=2, min_row=5, max_row=5 + len(metrics_df)), titles_from_data=True)
+    kpi_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=6, max_row=5 + len(metrics_df)))
+    ws_metrics.add_chart(kpi_chart, f"A{row}")
+
+    row += 15
+    key_drivers_df = summary_tables["key_drivers"].copy()
+    row = _write_styled_table(ws_metrics, key_drivers_df, "Key Drivers", start_row=row)
+
+    annual_core = outputs.annual_summary.reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})
+    row = _write_styled_table(
+        ws_metrics,
+        annual_core[["Year", "revenue_total", "ebitda", "fcff", "equity_cash_flow"]],
+        "Annual Performance Trend",
+        start_row=row,
+    )
+    trend_chart = LineChart()
+    trend_chart.title = "Revenue / EBITDA / FCFF"
+    trend_chart.width = 13
+    trend_chart.height = 6
+    for col in (2, 3, 4):
+        trend_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(annual_core) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    trend_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(annual_core), max_row=row - 2)
+    )
+    ws_metrics.add_chart(trend_chart, f"A{row}")
+
+    row += 15
+    revenue_schedule = outputs.monthly_results.filter(like="revenue_").resample("YE").sum()
+    revenue_schedule.index = revenue_schedule.index.year
+    revenue_schedule = revenue_schedule.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_metrics, revenue_schedule, "Gross Revenue Schedule", start_row=row)
+    revenue_chart = BarChart()
+    revenue_chart.type = "col"
+    revenue_chart.grouping = "stacked"
+    revenue_chart.title = "Revenue Composition"
+    revenue_chart.width = 13
+    revenue_chart.height = 5.5
+    revenue_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(revenue_schedule) - 1, max_col=revenue_schedule.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    revenue_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(revenue_schedule), max_row=row - 2))
+    ws_metrics.add_chart(revenue_chart, f"A{row}")
+
+    row += 15
+    expense_schedule = outputs.monthly_results.filter(like="opex_").resample("YE").sum()
+    expense_schedule.index = expense_schedule.index.year
+    expense_schedule["total_opex"] = expense_schedule.sum(axis=1)
+    expense_schedule = expense_schedule.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_metrics, expense_schedule, "Operating Expense Schedule", start_row=row)
+    opex_chart = BarChart()
+    opex_chart.type = "col"
+    opex_chart.grouping = "stacked"
+    opex_chart.title = "Operating Cost Composition"
+    opex_chart.width = 13
+    opex_chart.height = 5.5
+    opex_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(expense_schedule) - 1, max_col=expense_schedule.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    opex_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(expense_schedule), max_row=row - 2))
+    ws_metrics.add_chart(opex_chart, f"A{row}")
+
+    row += 15
+    debt_schedule = outputs.annual_summary.reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})[
+        ["Year", "debt_draw", "debt_principal", "debt_interest"]
+    ]
+    row = _write_styled_table(ws_metrics, debt_schedule, "Debt Service Schedule", start_row=row)
+    debt_chart = LineChart()
+    debt_chart.title = "Debt Draw / Principal / Interest"
+    debt_chart.width = 13
+    debt_chart.height = 5.5
+    for col in (2, 3, 4):
+        debt_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(debt_schedule) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    debt_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(debt_schedule), max_row=row - 2))
+    ws_metrics.add_chart(debt_chart, f"A{row}")
+
+    row += 15
+    cash_schedule = outputs.annual_summary.reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})[
+        ["Year", "fcff", "equity_cash_flow", "capex", "delta_working_capital"]
+    ]
+    row = _write_styled_table(ws_metrics, cash_schedule, "Cash Flow Schedule", start_row=row)
+    cash_sched_chart = LineChart()
+    cash_sched_chart.title = "FCFF vs Equity Cash Flow"
+    cash_sched_chart.width = 13
+    cash_sched_chart.height = 5.5
+    for col in (2, 3):
+        cash_sched_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(cash_schedule) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cash_sched_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(cash_schedule), max_row=row - 2))
+    ws_metrics.add_chart(cash_sched_chart, f"A{row}")
+
+    row += 15
+    monthly_energy = outputs.monthly_results.reset_index()[["month_start", "energy_mwh"]].rename(
+        columns={"month_start": "Month", "energy_mwh": "Monthly Energy Production"}
+    )
+    row = _write_styled_table(ws_metrics, monthly_energy, "Monthly energy production", start_row=row)
+    monthly_energy_chart = LineChart()
+    monthly_energy_chart.title = "Monthly energy production"
+    monthly_energy_chart.width = 13
+    monthly_energy_chart.height = 5.5
+    monthly_energy_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(monthly_energy) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    monthly_energy_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(monthly_energy), max_row=row - 2)
+    )
+    ws_metrics.add_chart(monthly_energy_chart, f"A{row}")
+
+    row += 15
+    annual_energy = outputs.monthly_results["energy_mwh"].resample("YE").sum().reset_index()
+    annual_energy["Year"] = pd.to_datetime(annual_energy["month_start"]).dt.year
+    annual_energy = annual_energy.drop(columns=["month_start"]).rename(columns={"energy_mwh": "Energy production"})
+    row = _write_styled_table(ws_metrics, annual_energy, "Energy production", start_row=row)
+    energy_chart = BarChart()
+    energy_chart.title = "Energy production"
+    energy_chart.width = 12
+    energy_chart.height = 5.5
+    energy_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(annual_energy) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    energy_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(annual_energy), max_row=row - 2))
+    ws_metrics.add_chart(energy_chart, f"A{row}")
+
+    row += 15
+    equity_cf = outputs.monthly_results.reset_index()[["month_start", "equity_cash_flow"]].rename(
+        columns={"month_start": "Month", "equity_cash_flow": "Equity cash flow"}
+    )
+    row = _write_styled_table(ws_metrics, equity_cf, "Equity cash flow", start_row=row)
+    equity_chart = LineChart()
+    equity_chart.title = "Equity cash flow"
+    equity_chart.width = 13
+    equity_chart.height = 5.5
+    equity_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(equity_cf) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    equity_chart.set_categories(Reference(ws_metrics, min_col=1, min_row=row - len(equity_cf), max_row=row - 2))
+    ws_metrics.add_chart(equity_chart, f"A{row}")
+
+    row += 15
+    total_opex_monthly = outputs.monthly_results.reset_index()[["month_start", "total_opex"]].rename(
+        columns={"month_start": "Month", "total_opex": "Total operating cost"}
+    )
+    row = _write_styled_table(ws_metrics, total_opex_monthly, "Total operating cost", start_row=row)
+    total_opex_chart = LineChart()
+    total_opex_chart.title = "Total operating cost"
+    total_opex_chart.width = 13
+    total_opex_chart.height = 5.5
+    total_opex_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(total_opex_monthly) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    total_opex_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(total_opex_monthly), max_row=row - 2)
+    )
+    ws_metrics.add_chart(total_opex_chart, f"A{row}")
+
+    row += 15
+    cost_breakdown = outputs.monthly_results.filter(like="opex_").resample("YE").sum().reset_index()
+    cost_breakdown["Year"] = pd.to_datetime(cost_breakdown["month_start"]).dt.year
+    cost_breakdown = cost_breakdown.drop(columns=["month_start"])
+    cost_breakdown = cost_breakdown[["Year"] + [c for c in cost_breakdown.columns if c != "Year"]]
+    row = _write_styled_table(ws_metrics, cost_breakdown, "Cost breakdown", start_row=row)
+    cost_breakdown_chart = BarChart()
+    cost_breakdown_chart.type = "col"
+    cost_breakdown_chart.grouping = "stacked"
+    cost_breakdown_chart.title = "Cost breakdown"
+    cost_breakdown_chart.width = 13
+    cost_breakdown_chart.height = 5.5
+    cost_breakdown_chart.add_data(
+        Reference(ws_metrics, min_col=2, min_row=row - len(cost_breakdown) - 1, max_col=cost_breakdown.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    cost_breakdown_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(cost_breakdown), max_row=row - 2)
+    )
+    ws_metrics.add_chart(cost_breakdown_chart, f"A{row}")
+
+    row += 15
+    capex_debt = outputs.monthly_results.reset_index()[
+        ["month_start", "capex", "debt_draw", "debt_principal", "debt_balance"]
+    ].rename(columns={"month_start": "Month"})
+    row = _write_styled_table(ws_metrics, capex_debt, "Capital expenditure and debt", start_row=row)
+    capex_debt_chart = LineChart()
+    capex_debt_chart.title = "Capital expenditure and debt"
+    capex_debt_chart.width = 13
+    capex_debt_chart.height = 5.5
+    for col in (2, 3, 4, 5):
+        capex_debt_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(capex_debt) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    capex_debt_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(capex_debt), max_row=row - 2)
+    )
+    ws_metrics.add_chart(capex_debt_chart, f"A{row}")
+
+    row += 15
+    cash_returns = outputs.monthly_results.reset_index()[
+        ["month_start", "fcff", "equity_cash_flow", "investor_cash_flow", "owner_cash_flow"]
+    ].rename(columns={"month_start": "Month", "fcff": "FCFF"})
+    row = _write_styled_table(ws_metrics, cash_returns, "Cash Flow & Returns", start_row=row)
+    cash_returns_chart = LineChart()
+    cash_returns_chart.title = "Cash Flow & Returns"
+    cash_returns_chart.width = 13
+    cash_returns_chart.height = 5.5
+    for col in (2, 3, 4, 5):
+        cash_returns_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(cash_returns) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cash_returns_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(cash_returns), max_row=row - 2)
+    )
+    ws_metrics.add_chart(cash_returns_chart, f"A{row}")
+
+    row += 15
+    cumulative_cash = outputs.monthly_results.reset_index()[
+        ["month_start", "fcff", "equity_cash_flow", "investor_cash_flow", "owner_cash_flow"]
+    ].rename(
+        columns={
+            "month_start": "Month",
+            "fcff": "FCFF",
+            "equity_cash_flow": "Equity Cash Flow",
+            "investor_cash_flow": "Investor Cash Flow",
+            "owner_cash_flow": "Owner Cash Flow",
+        }
+    )
+    for col in ["FCFF", "Equity Cash Flow", "Investor Cash Flow", "Owner Cash Flow"]:
+        cumulative_cash[f"Cumulative {col}"] = cumulative_cash[col].cumsum()
+    cumulative_cash = cumulative_cash[
+        [
+            "Month",
+            "Cumulative FCFF",
+            "Cumulative Equity Cash Flow",
+            "Cumulative Investor Cash Flow",
+            "Cumulative Owner Cash Flow",
+        ]
+    ]
+    row = _write_styled_table(ws_metrics, cumulative_cash, "Cumulative cash flows", start_row=row)
+    cumulative_chart = LineChart()
+    cumulative_chart.title = "Cumulative cash flows"
+    cumulative_chart.width = 13
+    cumulative_chart.height = 5.5
+    for col in (2, 3, 4, 5):
+        cumulative_chart.add_data(
+            Reference(ws_metrics, min_col=col, min_row=row - len(cumulative_cash) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cumulative_chart.set_categories(
+        Reference(ws_metrics, min_col=1, min_row=row - len(cumulative_cash), max_row=row - 2)
+    )
+    ws_metrics.add_chart(cumulative_chart, f"A{row}")
+
+    # ------------------------------------------------------------------
+    # Sheet 2: Financials
+    ws_fin = wb.create_sheet("Financials")
+    _excel_title(ws_fin, "Financials", "Financial Performance, Position, and Cash Flow Statement")
+
+    monthly = outputs.monthly_results
+    income = outputs.annual_summary[
+        ["revenue_total", "total_opex", "ebitda", "ebit", "tax_payment", "net_income"]
+    ].reset_index().rename(columns={outputs.annual_summary.index.name or "index": "Year"})
+    row = _write_styled_table(ws_fin, income, "Financial Performance", start_row=4)
+
+    income_chart = BarChart()
+    income_chart.title = "EBITDA and Net Income by Year"
+    income_chart.width = 12
+    income_chart.height = 5.5
+    for col in (4, 7):
+        income_chart.add_data(
+            Reference(ws_fin, min_col=col, min_row=5, max_row=5 + len(income)),
+            titles_from_data=True,
+        )
+    income_chart.set_categories(Reference(ws_fin, min_col=1, min_row=6, max_row=5 + len(income)))
+    ws_fin.add_chart(income_chart, f"A{row}")
+
+    row += 15
+    gross_revenue = outputs.monthly_results.filter(like="revenue_").resample("YE").sum()
+    gross_revenue.index = gross_revenue.index.year
+    gross_revenue = gross_revenue.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_fin, gross_revenue, "Gross Revenue Schedule", start_row=row)
+    gross_chart = BarChart()
+    gross_chart.type = "col"
+    gross_chart.grouping = "stacked"
+    gross_chart.title = "Gross Revenue Schedule"
+    gross_chart.width = 12
+    gross_chart.height = 5.5
+    gross_chart.add_data(
+        Reference(ws_fin, min_col=2, min_row=row - len(gross_revenue) - 1, max_col=gross_revenue.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    gross_chart.set_categories(Reference(ws_fin, min_col=1, min_row=row - len(gross_revenue), max_row=row - 2))
+    ws_fin.add_chart(gross_chart, f"A{row}")
+
+    row += 15
+    total_expense = outputs.monthly_results.filter(like="opex_").resample("YE").sum()
+    total_expense.index = total_expense.index.year
+    total_expense["Total"] = total_expense.sum(axis=1)
+    total_expense = total_expense.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+    row = _write_styled_table(ws_fin, total_expense, "Total Expense Schedule", start_row=row)
+    expense_chart = BarChart()
+    expense_chart.type = "col"
+    expense_chart.grouping = "stacked"
+    expense_chart.title = "Total Expense Composition"
+    expense_chart.width = 12
+    expense_chart.height = 5.5
+    expense_chart.add_data(
+        Reference(ws_fin, min_col=2, min_row=row - len(total_expense) - 1, max_col=total_expense.shape[1], max_row=row - 2),
+        titles_from_data=True,
+    )
+    expense_chart.set_categories(Reference(ws_fin, min_col=1, min_row=row - len(total_expense), max_row=row - 2))
+    ws_fin.add_chart(expense_chart, f"A{row}")
+
+    opening_ppe = monthly.get("ppe_opening_balance", pd.Series(0.0, index=monthly.index)).cumsum()
+    net_ppe = (opening_ppe + monthly["capex"].cumsum() - monthly["depreciation"].cumsum()).clip(lower=0)
+    cash_balance = monthly["equity_cash_flow"].cumsum()
+    debt_balance = monthly.get("debt_balance", pd.Series(0.0, index=monthly.index))
+    total_assets = cash_balance + monthly.get("accounts_receivable", 0) + net_ppe
+    total_liabilities = debt_balance + monthly.get("accounts_payable", 0)
+    balance = pd.DataFrame(
+        {
+            "Cash": cash_balance,
+            "Net PP&E": net_ppe,
+            "Total Assets": total_assets,
+            "Debt Outstanding": debt_balance,
+            "Total Liabilities": total_liabilities,
+            "Equity": total_assets - total_liabilities,
+        },
+        index=monthly.index,
+    ).resample("YE").last()
+    balance.index = balance.index.year
+    balance_df = balance.reset_index().rename(columns={"index": "Year"})
+
+    row += 15
+    row = _write_styled_table(ws_fin, balance_df, "Financial Position", start_row=row)
+    position_chart = LineChart()
+    position_chart.title = "Assets vs Liabilities vs Equity"
+    position_chart.width = 12
+    position_chart.height = 5.5
+    for col in (4, 6, 7):
+        position_chart.add_data(
+            Reference(ws_fin, min_col=col, min_row=row - len(balance_df) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    position_chart.set_categories(
+        Reference(ws_fin, min_col=1, min_row=row - len(balance_df), max_row=row - 2)
+    )
+    ws_fin.add_chart(position_chart, f"A{row}")
+
+    ebitda = monthly["ebitda"].resample("YE").sum()
+    taxes = monthly["tax_payment"].resample("YE").sum()
+    interest = monthly["debt_interest"].resample("YE").sum()
+    wc = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("YE").sum()
+    investing_cf = (-monthly["capex"]).resample("YE").sum()
+    financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("YE").sum()
+    net_cf = ebitda - taxes - interest - wc + investing_cf + financing_cf
+    cash_flow_df = pd.DataFrame(
+        {
+            "Year": ebitda.index.year,
+            "Operating CF": ebitda - taxes - interest - wc,
+            "Investing CF": investing_cf,
+            "Financing CF": financing_cf,
+            "Net Change in Cash": net_cf,
+        }
+    )
+
+    row += 15
+    row = _write_styled_table(ws_fin, cash_flow_df, "Cash Flow Statement", start_row=row)
+    cf_chart = LineChart()
+    cf_chart.title = "Operating / Investing / Financing Cash Flows"
+    cf_chart.width = 12
+    cf_chart.height = 5.5
+    for col in (2, 3, 4):
+        cf_chart.add_data(
+            Reference(ws_fin, min_col=col, min_row=row - len(cash_flow_df) - 1, max_row=row - 2),
+            titles_from_data=True,
+        )
+    cf_chart.set_categories(
+        Reference(ws_fin, min_col=1, min_row=row - len(cash_flow_df), max_row=row - 2)
+    )
+    ws_fin.add_chart(cf_chart, f"A{row}")
+
+    # ------------------------------------------------------------------
+    # Sheet 3: Key Analytics
+    ws_analytics = wb.create_sheet("Key Analytics")
+    _excel_title(ws_analytics, "Key Analytics", "Sensitivity, scenario, simulation, and break-even diagnostics")
+
+    sensitivity_records: List[Dict[str, object]] = []
+    for variable_key in list(SENSITIVITY_OPTIONS.keys())[:4]:
+        label, apply_fn = SENSITIVITY_OPTIONS[variable_key]
+        for multiplier in (0.90, 1.00, 1.10):
+            metrics = outputs.metrics if math.isclose(multiplier, 1.0) else _simulate_metrics(
+                assumptions, lambda a, fn=apply_fn, m=multiplier: fn(a, m)
+            )
+            sensitivity_records.append(
+                {
+                    "Variable": label,
+                    "Multiplier": multiplier,
+                    "Project NPV": metrics.get("project_npv", float("nan")),
+                    "Project IRR": metrics.get("project_irr", float("nan")),
+                    "Payback (months)": metrics.get("project_payback_months", float("nan")),
+                }
+            )
+    sensitivity_df = pd.DataFrame(sensitivity_records)
+    row = _write_styled_table(ws_analytics, sensitivity_df, "Sensitivity Analysis (0.9x / 1.0x / 1.1x)", start_row=4)
+    sens_chart = BarChart()
+    sens_chart.title = "Sensitivity: Project NPV by Multiplier"
+    sens_chart.width = 12
+    sens_chart.height = 5.5
+    sens_chart.add_data(
+        Reference(ws_analytics, min_col=3, min_row=5, max_row=5 + len(sensitivity_df)),
+        titles_from_data=True,
+    )
+    sens_chart.set_categories(Reference(ws_analytics, min_col=2, min_row=6, max_row=5 + len(sensitivity_df)))
+    ws_analytics.add_chart(sens_chart, f"A{row}")
+
+    goal_seek_records: List[Dict[str, object]] = []
+    target_npv = float(outputs.metrics.get("project_npv", float("nan"))) * 1.1
+    for variable_key, (label, apply_fn) in list(SENSITIVITY_OPTIONS.items())[:4]:
+        best_multiplier = 1.0
+        best_value = float(outputs.metrics.get("project_npv", float("nan")))
+        best_gap = abs(best_value - target_npv)
+        for multiplier in GOAL_SEEK_MULTIPLIERS:
+            metrics = outputs.metrics if math.isclose(multiplier, 1.0) else _simulate_metrics(
+                assumptions,
+                lambda a, fn=apply_fn, m=multiplier: fn(a, m),
+            )
+            candidate = float(metrics.get("project_npv", float("nan")))
+            gap = abs(candidate - target_npv)
+            if gap < best_gap:
+                best_gap = gap
+                best_multiplier = multiplier
+                best_value = candidate
+        goal_seek_records.append(
+            {
+                "Variable": label,
+                "Target Project NPV": target_npv,
+                "Recommended Multiplier": best_multiplier,
+                "Projected Project NPV": best_value,
+                "Gap vs Target": best_value - target_npv,
+            }
+        )
+    goal_seek_df = pd.DataFrame(goal_seek_records)
+    row += 15
+    row = _write_styled_table(ws_analytics, goal_seek_df, "Goal Seek Schedule", start_row=row)
+    goal_chart = BarChart()
+    goal_chart.title = "Goal Seek: Projected NPV by Variable"
+    goal_chart.width = 12
+    goal_chart.height = 5.5
+    goal_chart.add_data(
+        Reference(ws_analytics, min_col=4, min_row=row - len(goal_seek_df) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    goal_chart.set_categories(Reference(ws_analytics, min_col=1, min_row=row - len(goal_seek_df), max_row=row - 2))
+    ws_analytics.add_chart(goal_chart, f"A{row}")
+
+    scenario_rows = [
+        {"Scenario": "Base", "Revenue Multiplier": 1.00, "Opex Multiplier": 1.00, "Capex Multiplier": 1.00},
+        {"Scenario": "Upside", "Revenue Multiplier": 1.05, "Opex Multiplier": 0.95, "Capex Multiplier": 0.95},
+        {"Scenario": "Downside", "Revenue Multiplier": 0.95, "Opex Multiplier": 1.05, "Capex Multiplier": 1.05},
+    ]
+
+    def _apply_combo_multipliers(
+        target: Assumptions,
+        revenue_multiplier: float,
+        opex_multiplier: float,
+        capex_multiplier: float,
+    ) -> None:
+        _apply_sensitivity_ppa_rate(target, revenue_multiplier)
+        _apply_sensitivity_merchant_rate(target, revenue_multiplier)
+        _apply_sensitivity_rec_rate(target, revenue_multiplier)
+        _apply_sensitivity_fixed_opex(target, opex_multiplier)
+        _apply_sensitivity_variable_opex(target, opex_multiplier)
+        _apply_sensitivity_capex(target, capex_multiplier)
+
+    scenario_records: List[Dict[str, object]] = []
+    for row_cfg in scenario_rows:
+        if row_cfg["Scenario"] == "Base":
+            metrics = outputs.metrics
+        else:
+            metrics = _simulate_metrics(
+                assumptions,
+                lambda a, cfg=row_cfg: _apply_combo_multipliers(
+                    a,
+                    cfg["Revenue Multiplier"],
+                    cfg["Opex Multiplier"],
+                    cfg["Capex Multiplier"],
+                ),
+            )
+        scenario_records.append(
+            {
+                **row_cfg,
+                "Project NPV": metrics.get("project_npv", float("nan")),
+                "Project IRR": metrics.get("project_irr", float("nan")),
+            }
+        )
+    scenario_df = pd.DataFrame(scenario_records)
+    row += 15
+    row = _write_styled_table(ws_analytics, scenario_df, "Scenario / IFs Analysis", start_row=row)
+    scen_chart = BarChart()
+    scen_chart.title = "Scenario Comparison: Project NPV"
+    scen_chart.width = 11
+    scen_chart.height = 5.5
+    scen_chart.add_data(
+        Reference(ws_analytics, min_col=5, min_row=row - len(scenario_df) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    scen_chart.set_categories(
+        Reference(ws_analytics, min_col=1, min_row=row - len(scenario_df), max_row=row - 2)
+    )
+    ws_analytics.add_chart(scen_chart, f"A{row}")
+
+    rng = np.random.default_rng(42)
+    mc_values = []
+    for _ in range(100):
+        revenue_mult = float(rng.normal(1.0, 0.05))
+        opex_mult = float(rng.normal(1.0, 0.04))
+        metrics = _simulate_metrics(
+            assumptions,
+            lambda a, rm=revenue_mult, om=opex_mult: _apply_combo_multipliers(
+                a,
+                rm,
+                om,
+                1.0,
+            ),
+        )
+        mc_values.append(
+            {
+                "Revenue Multiplier": revenue_mult,
+                "Opex Multiplier": opex_mult,
+                "Project NPV": metrics.get("project_npv", float("nan")),
+            }
+        )
+    mc_df = pd.DataFrame(mc_values)
+    mc_summary = mc_df["Project NPV"].agg(["mean", "std", "min", "max"]).to_frame(name="Value").reset_index()
+    mc_summary = mc_summary.rename(columns={"index": "Statistic"})
+    row += 15
+    row = _write_styled_table(ws_analytics, mc_summary, "Monte Carlo Summary (Project NPV)", start_row=row)
+    mc_chart = LineChart()
+    mc_chart.title = "Monte Carlo Project NPV Trend (sample order)"
+    mc_chart.width = 12
+    mc_chart.height = 5.5
+    mc_export = mc_df[["Project NPV"]].reset_index().rename(columns={"index": "Run"})
+    row = _write_styled_table(ws_analytics, mc_export.head(80), "Monte Carlo Simulation", start_row=row + 14)
+    mc_chart.add_data(
+        Reference(ws_analytics, min_col=2, min_row=row - 121, max_row=row - 2),
+        titles_from_data=True,
+    )
+    mc_chart.set_categories(Reference(ws_analytics, min_col=1, min_row=row - 120, max_row=row - 2))
+    ws_analytics.add_chart(mc_chart, f"A{row}")
+
+    break_even_inputs = pd.DataFrame(st.session_state.get(BREAK_EVEN_STATE_KEY, BREAK_EVEN_DEFAULTS)).copy()
+    if not break_even_inputs.empty:
+        selected_columns = ["product", "fixed_cost", "variable_cost", "selling_price", "target_profit", "expected_volume"]
+        break_even_inputs = break_even_inputs[[c for c in selected_columns if c in break_even_inputs.columns]]
+        break_even_inputs = break_even_inputs.rename(
+            columns={
+                "product": "Product",
+                "fixed_cost": "Fixed Cost",
+                "variable_cost": "Variable Cost",
+                "selling_price": "Selling Price",
+                "target_profit": "Target Profit",
+                "expected_volume": "Expected Volume",
+            }
+        )
+    row += 15
+    row = _write_styled_table(ws_analytics, break_even_inputs, "Break-even Analysis Inputs", start_row=row)
+
+    break_even_results_records: List[Dict[str, object]] = []
+    for _, be_input in break_even_inputs.iterrows():
+        product = str(be_input.get("Product", "Unlabelled"))
+        fixed_cost = float(be_input.get("Fixed Cost", 0.0))
+        variable_cost = float(be_input.get("Variable Cost", 0.0))
+        selling_price = float(be_input.get("Selling Price", 0.0))
+        target_profit = float(be_input.get("Target Profit", 0.0))
+        contribution = selling_price - variable_cost
+        if contribution > 0:
+            units = (fixed_cost + target_profit) / contribution
+            revenue = units * selling_price
+        else:
+            units = float("nan")
+            revenue = float("nan")
+        break_even_results_records.append(
+            {
+                "Product": product,
+                "Contribution Margin": contribution,
+                "Break-even Units": units,
+                "Break-even Revenue": revenue,
+            }
+        )
+    break_even_results = pd.DataFrame(break_even_results_records)
+    row += 15
+    row = _write_styled_table(ws_analytics, break_even_results, "Break-even Results", start_row=row)
+    break_even_chart = BarChart()
+    break_even_chart.title = "Break-even Results"
+    break_even_chart.width = 12
+    break_even_chart.height = 5.5
+    break_even_chart.add_data(
+        Reference(ws_analytics, min_col=3, min_row=row - len(break_even_results) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    break_even_chart.set_categories(
+        Reference(ws_analytics, min_col=1, min_row=row - len(break_even_results), max_row=row - 2)
+    )
+    ws_analytics.add_chart(break_even_chart, f"A{row}")
+
+    be_df = pd.DataFrame(
+        {
+            "Month": monthly.index.astype(str),
+            "Equity Cash Flow": monthly["equity_cash_flow"].values,
+            "Cumulative Equity Cash Flow": monthly["equity_cash_flow"].cumsum().values,
+            "FCFF": monthly["fcff"].values,
+        }
+    )
+    row += 15
+    row = _write_styled_table(ws_analytics, be_df, "Break-Even & Payback", start_row=row)
+    be_chart = LineChart()
+    be_chart.title = "Cumulative Equity Cash Flow (Break-even Tracking)"
+    be_chart.width = 12
+    be_chart.height = 5.5
+    be_chart.add_data(
+        Reference(ws_analytics, min_col=3, min_row=row - len(be_df) - 1, max_row=row - 2),
+        titles_from_data=True,
+    )
+    be_chart.set_categories(
+        Reference(ws_analytics, min_col=1, min_row=row - len(be_df), max_row=row - 2)
+    )
+    ws_analytics.add_chart(be_chart, f"A{row}")
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
 
 
 def _coerce_float(value: object, default: float = 0.0) -> float:
@@ -600,6 +1756,18 @@ def _format_projection_caption(assumptions: Assumptions) -> str:
 
 
 st.set_page_config(page_title="Solar Farm Financial Model", layout="wide")
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarNav"],
+    [data-testid="collapsedControl"] {
+        display: none;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 GenericTableRow = Dict[str, object]
@@ -718,6 +1886,39 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "input_type": "number",
         "min": 0.0,
         "step": 24.0,
+    },
+    {
+        "id": "panel_watt_dc",
+        "label": "Panel Watt (DC)",
+        "value": 550.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 10.0,
+    },
+    {
+        "id": "dc_ac_ratio",
+        "label": "DC/AC Ratio",
+        "value": 1.25,
+        "input_type": "number",
+        "min": 0.1,
+        "step": 0.01,
+    },
+    {
+        "id": "annual_production_growth_rate",
+        "label": "Annual Production Growth",
+        "value": 0.0,
+        "input_type": "percent",
+        "min": -0.5,
+        "max": 1.0,
+        "step": 0.005,
+    },
+    {
+        "id": "monthly_min_mwh",
+        "label": "Minimum Monthly Generation (MWh)",
+        "value": 10.0,
+        "input_type": "number",
+        "min": 0.0,
+        "step": 1.0,
     },
 ]
 
@@ -921,19 +2122,19 @@ GOAL_SEEK_STATE_KEY = "goal_seek_config"
 GOAL_SEEK_MULTIPLIERS = tuple(float(x) for x in np.linspace(0.5, 1.5, 41))
 
 
-SEASONALITY_DEFAULTS = [
-    {"month": "January", "share": 0.05},
-    {"month": "February", "share": 0.05},
-    {"month": "March", "share": 0.05},
-    {"month": "April", "share": 0.10},
-    {"month": "May", "share": 0.12},
-    {"month": "June", "share": 0.17},
-    {"month": "July", "share": 0.17},
-    {"month": "August", "share": 0.10},
-    {"month": "September", "share": 0.05},
-    {"month": "October", "share": 0.04},
-    {"month": "November", "share": 0.05},
-    {"month": "December", "share": 0.05},
+MONTHLY_GENERATION_DEFAULTS = [
+    {"month": "January", "expected_mwh": 635.1},
+    {"month": "February", "expected_mwh": 635.1},
+    {"month": "March", "expected_mwh": 635.1},
+    {"month": "April", "expected_mwh": 1270.2},
+    {"month": "May", "expected_mwh": 1524.2},
+    {"month": "June", "expected_mwh": 2159.3},
+    {"month": "July", "expected_mwh": 2159.3},
+    {"month": "August", "expected_mwh": 1270.2},
+    {"month": "September", "expected_mwh": 635.1},
+    {"month": "October", "expected_mwh": 508.1},
+    {"month": "November", "expected_mwh": 635.1},
+    {"month": "December", "expected_mwh": 635.1},
 ]
 
 
@@ -1424,50 +2625,43 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
         )
 
 
-def _render_seasonality_table() -> List[Dict[str, object]]:
-    state_key = "seasonality_table"
+def _render_monthly_generation_table() -> List[Dict[str, object]]:
+    state_key = "monthly_generation_table"
     if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(SEASONALITY_DEFAULTS)
+        st.session_state[state_key] = copy.deepcopy(MONTHLY_GENERATION_DEFAULTS)
 
-    st.markdown("### Seasonal Production Profile")
+    st.markdown("### Expected Monthly Production (MWh)")
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    total_share = 0.0
 
     for idx, row in enumerate(rows):
         with st.container(border=True):
-            col_month, col_share, col_remove = st.columns([3, 2, 1])
+            col_month, col_mwh, col_remove = st.columns([3, 2, 1])
             month = col_month.text_input(
                 "Month",
                 value=str(row.get("month", "")),
                 key=f"{state_key}_month_{idx}",
             )
-            share = col_share.number_input(
-                "Share",
-                value=float(row.get("share", 0.0)),
-                key=f"{state_key}_share_{idx}",
+            expected_mwh = col_mwh.number_input(
+                "Expected MWh",
+                value=float(row.get("expected_mwh", 0.0)),
+                key=f"{state_key}_expected_mwh_{idx}",
                 min_value=0.0,
-                max_value=1.0,
-                step=0.001,
+                step=1.0,
             )
             remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
         if remove_clicked:
             continue
-        total_share += share
-        updated_rows.append({"month": month, "share": share})
+        updated_rows.append({"month": month, "expected_mwh": expected_mwh})
 
     st.session_state[state_key] = updated_rows
 
-    if st.button("Add Seasonality Row", key=f"{state_key}_add"):
-        st.session_state[state_key].append({"month": "New Period", "share": 0.0})
+    if st.button("Add Monthly Production Row", key=f"{state_key}_add"):
+        st.session_state[state_key].append({"month": "New Period", "expected_mwh": 0.0})
 
     if updated_rows:
         if len(updated_rows) != 12:
-            st.warning("Seasonality should include 12 months to align with the model timeline.")
-        if not np.isclose(total_share, 1.0, atol=0.05):
-            st.info(
-                f"Current seasonality shares sum to {total_share:.2f}. The model will normalise values when running."
-            )
+            st.warning("Monthly production table should include 12 months to align with the model timeline.")
 
     return updated_rows
 
@@ -1498,6 +2692,24 @@ def _render_projection_horizon_section() -> Tuple[int, int]:
         help="Choose the final year for the projection horizon (up to 20 years).",
     )
     return start_year, int(end_year)
+
+
+PANEL_UNIT_COST_DEFAULT = 250.0
+
+
+def _solar_panels_amount(rows: List[Dict[str, object]]) -> float:
+    """Return the amount of the Solar Panels CAPEX line from initial investment rows."""
+    for row in rows:
+        if str(row.get("name", "")).strip().lower() == "solar panels":
+            return float(row.get("amount", 0.0))
+    return 0.0
+
+
+def _derived_panel_count(solar_panels_amount: float, panel_unit_cost: float) -> float:
+    """Derive panel count from CAPEX and unit cost."""
+    if panel_unit_cost <= 0:
+        return 0.0
+    return max(0.0, solar_panels_amount) / panel_unit_cost
 
 
 def _render_initial_investment_section() -> None:
@@ -1643,6 +2855,22 @@ def _render_initial_investment_section() -> None:
 
     total_equity = sum(float(row.get("amount", 0.0)) for row in st.session_state[state_key])
     st.markdown(f"**Total Equity:** ${total_equity:,.2f}")
+
+    solar_panels_amount = _solar_panels_amount(st.session_state[state_key])
+
+    panel_unit_cost = st.number_input(
+        "Panel Unit Cost ($/panel)",
+        min_value=0.0,
+        value=float(st.session_state.get("panel_unit_cost_input", PANEL_UNIT_COST_DEFAULT)),
+        step=5.0,
+        key="panel_unit_cost_input",
+        help="Used to derive panel count as Solar Panels amount ÷ panel unit cost.",
+    )
+    derived_panel_count = _derived_panel_count(solar_panels_amount, panel_unit_cost)
+    st.caption(
+        f"Derived Panel Count = Solar Panels (${solar_panels_amount:,.2f}) ÷ "
+        f"Unit Cost (${panel_unit_cost:,.2f}) = **{derived_panel_count:,.0f} panels**"
+    )
 
     st.caption(
         "Depreciation schedules are generated automatically from these entries; "
@@ -2376,22 +3604,12 @@ def _render_assumption_controls() -> tuple[
 
     st.subheader("Assumptions")
 
-    with st.container(border=True):
-        st.markdown("#### Upload assumption workbook")
-        uploaded_file = st.file_uploader(
-            "Drag and drop file here",
-            type=["xlsx", "xlsm", "xls"],
-            help="Optional Excel workbook matching the model template (max 200MB).",
-            key="uploaded_workbook",
-        )
-        st.caption("Limit 200MB per file · XLSX, XLSM, XLS")
-
     start_year, end_year = _render_projection_horizon_section()
     _render_label_value_table("Core Assumptions", "core_table", CORE_ASSUMPTION_DEFAULTS)
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
     _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
     _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
-    seasonality_rows = _render_seasonality_table()
+    monthly_generation_rows = _render_monthly_generation_table()
     _render_initial_investment_section()
     _render_labour_structure_section()
     _render_operating_expense_section()
@@ -2402,22 +3620,17 @@ def _render_assumption_controls() -> tuple[
     _render_inflation_schedule_section()
     _render_risk_schedule_section()
 
-    with st.container(border=True):
-        st.markdown("#### Deployment")
-        st.markdown(
-            """
-            Use the Streamlit Cloud deployer to launch this app directly from your GitHub repository.
-
-            [Deploy on Streamlit Cloud](https://share.streamlit.io/deploy?repository=https://github.com/YOUR_GITHUB_USERNAME/solar_farm&mainScript=streamlit_app.py)
-            """
-        )
-
-    excel_bytes = uploaded_file.getvalue() if uploaded_file is not None else None
+    excel_bytes = None
 
     project_name_override = (
         str(st.session_state.get("project_name_override", DEFAULT_PROJECT_NAME)).strip()
         or DEFAULT_PROJECT_NAME
     )
+
+    initial_investment_rows = copy.deepcopy(st.session_state.get("initial_investment", []))
+    solar_panels_amount = _solar_panels_amount(initial_investment_rows)
+    panel_unit_cost_input = float(st.session_state.get("panel_unit_cost_input", PANEL_UNIT_COST_DEFAULT))
+    derived_panel_count = _derived_panel_count(solar_panels_amount, panel_unit_cost_input)
 
     overrides: Dict[str, float | bool | str] = {
         "discount_rate": float(_get_row_value("core_table", "discount_rate", 0.10, float)),
@@ -2435,6 +3648,14 @@ def _render_assumption_controls() -> tuple[
         "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
         "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
         "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
+        "panel_count": float(derived_panel_count),
+        "panel_watt_dc": float(_get_row_value("energy_table", "panel_watt_dc", 550.0, float)),
+        "panel_unit_cost": float(panel_unit_cost_input),
+        "dc_ac_ratio": float(_get_row_value("energy_table", "dc_ac_ratio", 1.25, float)),
+        "annual_production_growth_rate": float(
+            _get_row_value("energy_table", "annual_production_growth_rate", 0.0, float)
+        ),
+        "monthly_min_mwh": float(_get_row_value("energy_table", "monthly_min_mwh", 10.0, float)),
         "ppa_share": float(_get_row_value("revenue_table", "ppa_share", 0.90, float)),
         "ppa_rate": float(_get_row_value("revenue_table", "ppa_rate", 160.0, float)),
         "ppa_escalation": float(_get_row_value("revenue_table", "ppa_escalation", 0.015, float)),
@@ -2445,8 +3666,6 @@ def _render_assumption_controls() -> tuple[
         "start_year": int(start_year),
         "end_year": int(end_year),
     }
-
-    initial_investment_rows = copy.deepcopy(st.session_state.get("initial_investment", []))
 
     labour_rows = [
         {
@@ -2479,7 +3698,7 @@ def _render_assumption_controls() -> tuple[
     return (
         excel_bytes,
         overrides,
-        seasonality_rows,
+        monthly_generation_rows,
         labour_rows,
         initial_investment_rows,
         cost_rows,
@@ -2503,7 +3722,7 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
 
 
 def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs) -> None:
-    """Display core, global, energy, and seasonality summaries."""
+    """Display core, global, energy, and monthly production summaries."""
 
     global_cfg = assumptions.global_assumptions
     energy_cfg = assumptions.energy
@@ -2582,30 +3801,29 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
     energy_cols[2].metric("Degradation Rate", _format_percentage(energy_cfg.degradation_rate))
     energy_cols[3].metric("Annual Hours", f"{energy_cfg.annual_hours:,}")
 
-    st.markdown("#### Seasonal Production Profile")
-    seasonality_df = pd.DataFrame(
-        {
-            "Month": [
-                "Jan",
-                "Feb",
-                "Mar",
-                "Apr",
-                "May",
-                "Jun",
-                "Jul",
-                "Aug",
-                "Sep",
-                "Oct",
-                "Nov",
-                "Dec",
-            ],
-            "Share of Annual Output": assumptions.energy.seasonality,
-        }
-    )
-    seasonality_df["Share of Annual Output"] = seasonality_df["Share of Annual Output"].apply(
-        _format_percentage
-    )
-    st.dataframe(seasonality_df, use_container_width=True, hide_index=True)
+    st.markdown("#### Monthly Production Profile")
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    if assumptions.energy.energy_model_mode == "monthly_expected_mwh" and assumptions.energy.monthly_expected_mwh:
+        monthly_df = pd.DataFrame(
+            {
+                "Month": months,
+                "Expected MWh (Year 1)": assumptions.energy.monthly_expected_mwh,
+            }
+        )
+        st.metric("Minimum Monthly Generation", f"{assumptions.energy.monthly_min_mwh:,.2f} MWh")
+        st.metric(
+            "Annual Production Growth",
+            _format_percentage(assumptions.energy.annual_production_growth_rate),
+        )
+    else:
+        monthly_df = pd.DataFrame(
+            {
+                "Month": months,
+                "Share of Annual Output": assumptions.energy.seasonality,
+            }
+        )
+        monthly_df["Share of Annual Output"] = monthly_df["Share of Annual Output"].apply(_format_percentage)
+    st.dataframe(monthly_df, use_container_width=True, hide_index=True)
 
 
 def _render_overview(outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame]) -> None:
@@ -2650,7 +3868,7 @@ def _render_revenue_and_energy(outputs: ModelOutputs) -> None:
     if not revenue_cols.empty:
         st.markdown("#### Revenue mix")
         st.area_chart(revenue_cols, use_container_width=True)
-        annual_revenue = revenue_cols.resample("A").sum()
+        annual_revenue = revenue_cols.resample("YE").sum()
         annual_revenue.index = annual_revenue.index.year
         st.dataframe(annual_revenue, use_container_width=True)
     else:
@@ -2670,7 +3888,7 @@ def _render_operating_costs(outputs: ModelOutputs) -> None:
     if not opex_cols.empty:
         st.markdown("#### Cost breakdown")
         st.area_chart(opex_cols, use_container_width=True)
-        annual_opex = opex_cols.resample("A").sum()
+        annual_opex = opex_cols.resample("YE").sum()
         annual_opex.index = annual_opex.index.year
         st.dataframe(annual_opex, use_container_width=True)
     else:
@@ -2729,8 +3947,10 @@ def _render_cash_flows(outputs: ModelOutputs) -> None:
         st.info("Cash flow outputs are not available for the current run.")
 
 
-def _render_data_and_downloads(outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame]) -> None:
-    """Expose the raw tables along with download buttons."""
+def _render_data_and_downloads(
+    outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame], assumptions: Assumptions
+) -> None:
+    """Expose the raw model tables."""
 
     st.subheader("Model tables")
     st.markdown("#### Monthly detail")
@@ -2742,18 +3962,36 @@ def _render_data_and_downloads(outputs: ModelOutputs, summary_tables: Dict[str, 
     st.markdown("#### Metrics")
     st.dataframe(summary_tables["metrics"], use_container_width=True)
 
-    st.divider()
-    st.subheader("Downloads")
-    st.write("Export CSV extracts for offline analysis.")
-    st.download_button(
-        "Download monthly results", data=_downloadable_csv(outputs.monthly_results), file_name="monthly_results.csv"
+def _render_downloads(
+    outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame], assumptions: Assumptions
+) -> None:
+    """Render export actions for the current model run."""
+    st.write("Export polished presentation outputs for offline analysis.")
+    workbook_key = "investor_workbook_bytes"
+    workbook_signature = (
+        float(outputs.metrics.get("project_npv", float("nan"))),
+        float(outputs.metrics.get("project_irr", float("nan"))),
+        float(outputs.metrics.get("equity_irr", float("nan"))),
+        float(outputs.metrics.get("investor_irr", float("nan"))),
+        float(outputs.metrics.get("owner_irr", float("nan"))),
+        float(outputs.metrics.get("project_payback_months", float("nan"))),
     )
-    st.download_button(
-        "Download annual summary", data=_downloadable_csv(outputs.annual_summary), file_name="annual_summary.csv"
-    )
-    st.download_button(
-        "Download metrics", data=_downloadable_csv(summary_tables["metrics"]), file_name="metrics.csv"
-    )
+    signature_key = "investor_workbook_signature"
+
+    if st.button("Prepare Investor Workbook", key="prepare_investor_workbook"):
+        with st.spinner("Preparing workbook (optimized cache + reduced simulation load)..."):
+            st.session_state[workbook_key] = _downloadable_excel(outputs, summary_tables, assumptions)
+            st.session_state[signature_key] = workbook_signature
+
+    if st.session_state.get(signature_key) == workbook_signature and workbook_key in st.session_state:
+        st.download_button(
+            "Download Investor Presentation Workbook (.xlsx)",
+            data=st.session_state[workbook_key],
+            file_name="solar_farm_investor_pack.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("Click **Prepare Investor Workbook** to generate the latest export for download.")
 
 
 def _render_financial_performance(outputs: ModelOutputs) -> None:
@@ -2775,7 +4013,7 @@ def _render_financial_performance(outputs: ModelOutputs) -> None:
     st.dataframe(income_statement, use_container_width=True)
 
     st.header("Gross Revenue Schedule")
-    revenue_schedule = outputs.monthly_results.filter(like="revenue_").resample("A").sum()
+    revenue_schedule = outputs.monthly_results.filter(like="revenue_").resample("YE").sum()
     revenue_schedule.index = revenue_schedule.index.year
     revenue_schedule = revenue_schedule.rename(
         columns=lambda c: c.replace("revenue_", "").replace("_", " ").title()
@@ -2783,7 +4021,7 @@ def _render_financial_performance(outputs: ModelOutputs) -> None:
     st.dataframe(revenue_schedule, use_container_width=True)
 
     st.header("Total Expense Schedule")
-    expense_schedule = outputs.monthly_results.filter(like="opex_").resample("A").sum()
+    expense_schedule = outputs.monthly_results.filter(like="opex_").resample("YE").sum()
     expense_schedule.index = expense_schedule.index.year
     expense_schedule = expense_schedule.rename(
         columns=lambda c: c.replace("opex_", "").replace("_", " ").title()
@@ -2833,7 +4071,7 @@ def _render_financial_position(outputs: ModelOutputs) -> None:
     balance["Equity"] = balance["Total Assets"] - balance["Total Liabilities"]
     balance["Total Liabilities & Equity"] = balance["Total Liabilities"] + balance["Equity"]
 
-    balance_sheet = balance.resample("A").last()
+    balance_sheet = balance.resample("YE").last()
     balance_sheet.index = balance_sheet.index.year
 
     st.header("Statement of Financial Position")
@@ -2844,14 +4082,14 @@ def _render_cash_flow_statement(outputs: ModelOutputs) -> None:
     """Show annual cash flow statement derived from the monthly projection."""
 
     monthly = outputs.monthly_results
-    ebitda = monthly["ebitda"].resample("A").sum()
-    taxes = monthly["tax_payment"].resample("A").sum()
-    interest = monthly["debt_interest"].resample("A").sum()
-    working_cap_change = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("A").sum()
+    ebitda = monthly["ebitda"].resample("YE").sum()
+    taxes = monthly["tax_payment"].resample("YE").sum()
+    interest = monthly["debt_interest"].resample("YE").sum()
+    working_cap_change = monthly.get("delta_working_capital", pd.Series(0.0, index=monthly.index)).resample("YE").sum()
     operating_cf = ebitda - taxes - interest - working_cap_change
-    investing_cf = (-monthly["capex"]).resample("A").sum()
-    financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("A").sum()
-    equity_cf = monthly["equity_cash_flow"].resample("A").sum()
+    investing_cf = (-monthly["capex"]).resample("YE").sum()
+    financing_cf = (monthly["debt_draw"] - monthly["debt_principal"]).resample("YE").sum()
+    equity_cf = monthly["equity_cash_flow"].resample("YE").sum()
 
     cash_flow = pd.DataFrame(
         {
@@ -4098,19 +5336,16 @@ def _render_break_even(outputs: ModelOutputs) -> None:
 
 st.title("Solar Farm Financial Model")
 st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
+_configure_llm_secrets()
 
 DEFAULT_PROJECT_NAME = "Solar 123, LLC"
 
 PAGE_OPTIONS = [
     "Input Landing Page",
     "Key Metrics Dashboard",
-    "Financial Performance",
-    "Financial Position",
-    "Cash Flow Statement",
-    "Sensitivity Analyses",
-    "Scenario / IFs Analysis",
-    "Monte Carlo Simulation",
-    "Break-Even & Payback",
+    "Financials",
+    "Key Analytics",
+    "AI Benchmark Assistant",
 ]
 
 tabs = st.tabs(PAGE_OPTIONS)
@@ -4119,7 +5354,7 @@ with tabs[0]:
     (
         excel_bytes,
         override_dict,
-        seasonality_rows,
+        monthly_generation_rows,
         labour_rows,
         initial_investment_rows,
         cost_rows,
@@ -4132,7 +5367,7 @@ with tabs[0]:
         risk_rows,
     ) = _render_assumption_controls()
 
-seasonality_tuple = _tupleize(seasonality_rows, ("month", "share"))
+monthly_generation_tuple = _tupleize(monthly_generation_rows, ("month", "expected_mwh"))
 labour_tuple = _tupleize(labour_rows, ("role", "annual_cost"))
 initial_investment_tuple = _tupleize(
     initial_investment_rows,
@@ -4188,7 +5423,7 @@ override_tuple = tuple(sorted(override_dict.items()))
 outputs, summary_tables, assumptions = _run_model(
     excel_bytes,
     override_tuple,
-    seasonality_tuple,
+    monthly_generation_tuple,
     labour_tuple,
     initial_investment_tuple,
     cost_tuple,
@@ -4212,6 +5447,9 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
     with tab:
         st.caption(projection_caption)
         if page_name == "Key Metrics Dashboard":
+            st.header("Downloads")
+            _render_downloads(outputs, summary_tables, assumptions)
+            st.divider()
             _render_assumption_snapshot(assumptions, outputs)
             st.divider()
             st.header("Overview")
@@ -4224,23 +5462,23 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             _render_capital_and_debt(outputs)
             st.header("Cash Flow & Returns")
             _render_cash_flows(outputs)
-            st.header("Data & Downloads")
-            _render_data_and_downloads(outputs, summary_tables)
-        elif page_name == "Financial Performance":
+            st.header("Data")
+            _render_data_and_downloads(outputs, summary_tables, assumptions)
+        elif page_name == "Financials":
             _render_financial_performance(outputs)
-        elif page_name == "Financial Position":
+            st.divider()
             _render_financial_position(outputs)
-        elif page_name == "Cash Flow Statement":
+            st.divider()
             _render_cash_flow_statement(outputs)
-        elif page_name == "Sensitivity Analyses":
+        elif page_name == "Key Analytics":
             _render_sensitivity_analysis(assumptions, outputs)
-        elif page_name == "Scenario / IFs Analysis":
+            st.divider()
             _render_scenario_analysis(assumptions, outputs)
-        elif page_name == "Monte Carlo Simulation":
+            st.divider()
             _render_monte_carlo(assumptions)
-        else:
+            st.divider()
             _render_break_even(outputs)
-
-with st.sidebar:
-    st.info("Use the Input Landing Page tab to upload workbooks and adjust assumptions.")
-    st.success("Model run complete. Adjust the inputs to refresh outputs.")
+        elif page_name == "AI Benchmark Assistant":
+            _render_ai_benchmark_assistant(outputs, assumptions)
+        else:
+            st.info("Select a page tab to view analytics.")
