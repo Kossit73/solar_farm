@@ -1460,6 +1460,7 @@ def _downloadable_excel(
     )
     ws_analytics.add_chart(be_chart, f"A{row}")
 
+    _add_workbook_overview_sheet(wb, outputs, summary_tables, assumptions)
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -1768,6 +1769,174 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+def _inject_app_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(250, 204, 21, 0.18), transparent 32%),
+                radial-gradient(circle at top right, rgba(125, 211, 252, 0.18), transparent 28%),
+                linear-gradient(180deg, #fffdf4 0%, #f5f8fc 56%, #eef5f8 100%);
+        }
+        .block-container {
+            padding-top: 1.3rem;
+            padding-bottom: 3rem;
+            max-width: 1460px;
+        }
+        .designer-hero {
+            margin-bottom: 1.2rem;
+            padding: 1.8rem 1.9rem;
+            border-radius: 28px;
+            border: 1px solid rgba(202, 138, 4, 0.14);
+            background:
+                linear-gradient(135deg, rgba(255, 251, 214, 0.96), rgba(255, 255, 255, 0.94)),
+                linear-gradient(135deg, rgba(202, 138, 4, 0.05), rgba(8, 145, 178, 0.06));
+            box-shadow: 0 24px 48px rgba(15, 23, 42, 0.08);
+        }
+        .designer-kicker {
+            margin: 0 0 0.45rem 0;
+            font-size: 0.78rem;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: #a16207;
+            font-weight: 700;
+        }
+        .designer-title {
+            margin: 0;
+            font-size: clamp(2rem, 2.8vw, 3.15rem);
+            line-height: 1.02;
+            color: #0f172a;
+            font-weight: 800;
+        }
+        .designer-copy {
+            max-width: 56rem;
+            margin: 0.7rem 0 0 0;
+            color: #475569;
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+        .designer-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.55rem;
+            margin-top: 1rem;
+        }
+        .designer-badge {
+            padding: 0.42rem 0.78rem;
+            border-radius: 999px;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            background: rgba(255, 255, 255, 0.92);
+            color: #0f766e;
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+        div[data-baseweb="tab-list"] {
+            gap: 0.55rem;
+            margin-bottom: 1rem;
+        }
+        div[data-baseweb="tab-list"] button {
+            min-height: 3rem;
+            border-radius: 999px;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            background: rgba(255, 255, 255, 0.72);
+            color: #475569;
+            padding: 0.25rem 1rem;
+        }
+        div[data-baseweb="tab-list"] button[aria-selected="true"] {
+            background: linear-gradient(135deg, #ca8a04, #0891b2);
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 12px 24px rgba(8, 145, 178, 0.16);
+        }
+        div[data-testid="stMetric"] {
+            border-radius: 20px;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            background: rgba(255, 255, 255, 0.88);
+            padding: 0.6rem 0.7rem;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_model_hero() -> None:
+    badges = "".join(
+        f'<span class="designer-badge">{label}</span>'
+        for label in (
+            "Investor workbook",
+            "Project finance model",
+            "Energy and cost analytics",
+            "AI benchmark support",
+        )
+    )
+    st.markdown(
+        f"""
+        <section class="designer-hero">
+            <p class="designer-kicker">Infrastructure finance planning</p>
+            <h1 class="designer-title">Solar Farm Financial Model</h1>
+            <p class="designer-copy">
+                Bring revenue, operating cost, debt, and return analytics into a cleaner executive shell
+                with a presentation-ready workbook designed for sponsors, lenders, and investment committees.
+            </p>
+            <div class="designer-badges">{badges}</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _add_workbook_overview_sheet(
+    wb: Workbook,
+    outputs: ModelOutputs,
+    summary_tables: Dict[str, pd.DataFrame],
+    assumptions: Assumptions,
+) -> None:
+    if "Overview" in wb.sheetnames:
+        del wb["Overview"]
+    ws = wb.create_sheet("Overview", 0)
+    accent = "B45309"
+    ws["A1"] = assumptions.global_assumptions.project_name or "Solar Farm Financial Model"
+    ws["A1"].font = Font(size=20, bold=True, color="0F172A")
+    ws["A2"] = "Executive overview covering key metrics, debt profile, cash flows, and analytics output."
+    ws["A2"].font = Font(size=11, color="475569")
+    ws["A4"] = "Executive Snapshot"
+    ws["A4"].font = Font(size=12, bold=True, color=accent)
+    ws["A5"] = "Metric"
+    ws["B5"] = "Value"
+    for cell in ws[5]:
+        cell.fill = PatternFill("solid", fgColor=accent)
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    metrics_df = summary_tables.get("metrics", pd.DataFrame()).copy()
+    rows: List[Tuple[str, object]] = []
+    if not metrics_df.empty:
+        for _, metric_row in metrics_df.head(6).iterrows():
+            label = MetricLabels.get(metric_row.get("metric"), str(metric_row.get("metric")).replace("_", " ").title())
+            rows.append((label, metric_row.get("value")))
+    rows.append(("Projection Start", assumptions.global_assumptions.start_date))
+    rows.append(("Forecast Months", assumptions.global_assumptions.forecast_months))
+    for row_idx, (label, value) in enumerate(rows[:8], start=6):
+        ws.cell(row=row_idx, column=1, value=label)
+        ws.cell(row=row_idx, column=2, value=value)
+    ws["D4"] = "Workbook Notes"
+    ws["D4"].font = Font(size=12, bold=True, color=accent)
+    notes = [
+        "The detailed dashboard, statements, and analytics tabs remain intact in this export.",
+        "Use this overview as the executive cover sheet for sponsor and lender circulation.",
+        "Key metrics and project assumptions stay aligned to the live model run.",
+    ]
+    for row_idx, note in enumerate(notes, start=5):
+        ws.cell(row=row_idx, column=4, value=f"• {note}")
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["D"].width = 60
+    ws.freeze_panes = "A6"
+    ws.sheet_view.showGridLines = False
 
 
 GenericTableRow = Dict[str, object]
@@ -5333,9 +5502,8 @@ def _render_break_even(outputs: ModelOutputs) -> None:
     st.line_chart(cumulative_df[["Cumulative Equity", "Cumulative FCFF"]], use_container_width=True)
     st.dataframe(cumulative_df, use_container_width=True)
 
-
-st.title("Solar Farm Financial Model")
-st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs interactively.")
+_inject_app_theme()
+_render_model_hero()
 _configure_llm_secrets()
 
 DEFAULT_PROJECT_NAME = "Solar 123, LLC"
