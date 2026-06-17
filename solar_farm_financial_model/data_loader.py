@@ -57,7 +57,7 @@ def _default_assumptions() -> Assumptions:
     distribution = DistributionSplit(investor_share=0.95, owner_share=0.05)
 
     global_assumptions = GlobalAssumptions(
-        project_name="Solar 123, LLC",
+        project_name="Solar Numquants Ltd",
         start_date=date(2025, 1, 1),
         forecast_months=240,
         include_terminal_value=True,

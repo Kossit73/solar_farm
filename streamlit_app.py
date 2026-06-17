@@ -5506,7 +5506,7 @@ _inject_app_theme()
 _render_model_hero()
 _configure_llm_secrets()
 
-DEFAULT_PROJECT_NAME = "Solar 123, LLC"
+DEFAULT_PROJECT_NAME = "Solar Numquants Ltd"
 
 PAGE_OPTIONS = [
     "Input Landing Page",
