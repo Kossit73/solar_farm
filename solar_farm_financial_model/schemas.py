@@ -54,6 +54,14 @@ class EnergyAssumptions:
     )
 
     def validate(self) -> None:
+        if self.capacity_mw < 0:
+            raise ValueError("capacity_mw cannot be negative.")
+        if not (0.0 <= self.capacity_factor <= 1.0):
+            raise ValueError("capacity_factor must be between 0 and 1.")
+        if self.degradation_rate < 0:
+            raise ValueError("degradation_rate cannot be negative.")
+        if self.annual_hours <= 0:
+            raise ValueError("annual_hours must be greater than zero.")
         if self.monthly_min_mwh < 0:
             raise ValueError("Monthly minimum MWh cannot be negative.")
         if self.panel_count < 0:
@@ -223,6 +231,14 @@ class GlobalAssumptions:
     tax: TaxAssumptions
     distribution: DistributionSplit
 
+    def validate(self) -> None:
+        if self.forecast_months <= 0:
+            raise ValueError("forecast_months must be greater than zero.")
+        if self.exit_multiple < 0:
+            raise ValueError("exit_multiple cannot be negative.")
+        if not (0.0 <= self.discount_rate < 1.0):
+            raise ValueError("discount_rate must be between 0 and 1.")
+
 
 @dataclass
 class Assumptions:
@@ -239,6 +255,10 @@ class Assumptions:
     inventory_settings: Sequence[InventoryPayableSettings] = field(default_factory=list)
     tax_schedule: Sequence[TaxRateSchedule] = field(default_factory=list)
     terminal_growth_rate: float = 0.0
+
+    def validate(self) -> None:
+        self.global_assumptions.validate()
+        self.energy.validate()
 
     def to_dict(self) -> Dict[str, object]:
         """Convert assumptions to a serialisable dictionary."""

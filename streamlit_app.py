@@ -21,10 +21,43 @@ import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 
+from solar_farm_financial_model.analytics_helpers import (
+    SENSITIVITY_OPTIONS,
+    apply_sensitivity_capex as _apply_sensitivity_capex_helper,
+    apply_sensitivity_capacity_factor as _apply_sensitivity_capacity_factor_helper,
+    apply_sensitivity_discount_rate as _apply_sensitivity_discount_rate_helper,
+    apply_sensitivity_fixed_opex as _apply_sensitivity_fixed_opex_helper,
+    apply_sensitivity_merchant_rate as _apply_sensitivity_merchant_rate_helper,
+    apply_sensitivity_ppa_rate as _apply_sensitivity_ppa_rate_helper,
+    apply_sensitivity_rec_rate as _apply_sensitivity_rec_rate_helper,
+    apply_sensitivity_variable_opex as _apply_sensitivity_variable_opex_helper,
+    simulate_metrics as _simulate_metrics_helper,
+    simulate_outputs as _simulate_outputs_helper,
+)
 from solar_farm_financial_model.data_loader import load_assumptions
+from solar_farm_financial_model.excel_reporting import (
+    add_workbook_overview_sheet as _add_workbook_overview_sheet_helper,
+    excel_title as _excel_title_helper,
+    write_styled_table as _write_styled_table_helper,
+)
+from solar_farm_financial_model.input_parsing import (
+    CALENDAR_HOURS_PER_YEAR,
+    apply_energy_input_mode as _apply_energy_input_mode_helper,
+    build_opex_items as _build_opex_items_helper,
+    capex_item_from_initial as _capex_item_from_initial_helper,
+    capex_item_from_row as _capex_item_from_row_helper,
+    coerce_float as _coerce_float_helper,
+    coerce_optional_float as _coerce_optional_float_helper,
+    coerce_optional_int as _coerce_optional_int_helper,
+    parse_spend_profile as _parse_spend_profile_helper,
+    rows_from_tuple as _rows_from_tuple_helper,
+    tupleize as _tupleize_helper,
+)
+from solar_farm_financial_model.presentation import (
+    inject_app_theme as _inject_app_theme_helper,
+    render_model_hero as _render_model_hero_helper,
+)
 from solar_farm_financial_model.ai import ConversationMemory, run_assistant_turn
 from solar_farm_financial_model.ai.providers import (
     PROVIDER_SPECS,
@@ -59,6 +92,12 @@ MetricLabels = {
     "investor_irr": "Investor IRR",
     "owner_irr": "Owner IRR",
     "project_payback_months": "Payback (months)",
+}
+
+ENERGY_INPUT_MODE_OPTIONS: Dict[str, str] = {
+    "capacity_factor": "Capacity factor (8760 hours)",
+    "resource_hours": "Annual resource hours",
+    "monthly_expected_mwh": "Monthly expected MWh",
 }
 
 
@@ -302,24 +341,19 @@ def _run_model(
     energy.capacity_mw = float(overrides["capacity_mw"])
     energy.capacity_factor = float(overrides["capacity_factor"])
     energy.degradation_rate = float(overrides["degradation_rate"])
-    energy.annual_hours = max(0, int(round(float(overrides["annual_hours"]))))
+    energy.annual_hours = int(CALENDAR_HOURS_PER_YEAR)
     energy.panel_count = max(0.0, float(overrides["panel_count"]))
     energy.panel_watt_dc = max(0.0, float(overrides["panel_watt_dc"]))
     energy.panel_unit_cost = max(0.0, float(overrides["panel_unit_cost"]))
     energy.dc_ac_ratio = max(0.1, float(overrides["dc_ac_ratio"]))
-
-    monthly_values: List[float] = []
-    if monthly_generation_list:
-        monthly_values = [
-            max(0.0, _coerce_float(row.get("expected_mwh")))
-            for row in monthly_generation_list
-        ]
-
-    if len(monthly_values) == 12:
-        energy.energy_model_mode = "monthly_expected_mwh"
-        energy.monthly_expected_mwh = monthly_values
-    else:
-        energy.energy_model_mode = "share_based"
+    _apply_energy_input_mode_helper(
+        energy,
+        str(overrides.get("energy_input_mode", "capacity_factor")),
+        capacity_factor=float(overrides["capacity_factor"]),
+        annual_resource_hours=float(overrides.get("annual_resource_hours", 0.0)),
+        monthly_generation_rows=monthly_generation_list,
+    )
+    setattr(assumptions, "energy_input_mode", str(overrides.get("energy_input_mode", "capacity_factor")))
 
     energy.annual_production_growth_rate = float(overrides["annual_production_growth_rate"])
     energy.monthly_min_mwh = float(overrides["monthly_min_mwh"])
@@ -406,7 +440,6 @@ def _run_model(
     ]
     if tax_schedule:
         assumptions.tax_schedule = tax_schedule
-        assumptions.global_assumptions.tax.income_tax_rate = tax_schedule[0].tax_rate
 
     capex_items = []
     for row in initial_investment_list:
@@ -709,18 +742,7 @@ def _render_ai_benchmark_assistant(outputs: ModelOutputs, assumptions: Assumptio
 
 
 def _excel_title(ws, title: str, subtitle: str) -> None:
-    ws.merge_cells("A1:H1")
-    ws["A1"] = title
-    ws["A1"].font = Font(size=18, bold=True, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor="0B3D91")
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[1].height = 30
-
-    ws.merge_cells("A2:H2")
-    ws["A2"] = subtitle
-    ws["A2"].font = Font(size=11, color="1F2D3D", italic=True)
-    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[2].height = 22
+    _excel_title_helper(ws, title, subtitle)
 
 
 def _write_styled_table(
@@ -730,61 +752,7 @@ def _write_styled_table(
     start_row: int,
     start_col: int = 1,
 ) -> int:
-    """Write a styled dataframe section and return the next available row."""
-
-    section_row = start_row
-    ws.cell(row=section_row, column=start_col, value=title)
-    ws.cell(row=section_row, column=start_col).font = Font(size=13, bold=True, color="0B3D91")
-    section_row += 1
-
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-    border = Border(
-        left=Side(style="thin", color="D9E2F3"),
-        right=Side(style="thin", color="D9E2F3"),
-        top=Side(style="thin", color="D9E2F3"),
-        bottom=Side(style="thin", color="D9E2F3"),
-    )
-
-    frame = df.copy()
-    frame = frame.replace([np.inf, -np.inf], np.nan)
-    frame = frame.where(pd.notna(frame), None)
-
-    for col_idx, column_name in enumerate(frame.columns, start=start_col):
-        cell = ws.cell(row=section_row, column=col_idx, value=str(column_name))
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = border
-
-    data_start = section_row + 1
-    for row_offset, values in enumerate(frame.itertuples(index=False), start=0):
-        excel_row = data_start + row_offset
-        for col_idx, value in enumerate(values, start=start_col):
-            cell = ws.cell(row=excel_row, column=col_idx, value=value)
-            cell.border = border
-            column_name = str(frame.columns[col_idx - start_col]).lower()
-            if isinstance(value, (int, float, np.floating)) and value is not None:
-                if "irr" in column_name or "rate" in column_name or "share" in column_name:
-                    cell.number_format = "0.0%"
-                elif "month" in column_name and "payback" in column_name:
-                    cell.number_format = "0"
-                else:
-                    cell.number_format = '#,##0.00;[Red]-#,##0.00'
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-            else:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
-            if row_offset % 2 == 1:
-                cell.fill = PatternFill("solid", fgColor="F7FBFF")
-
-    last_row = data_start + max(len(frame) - 1, 0)
-    for col_idx, column_name in enumerate(frame.columns, start=start_col):
-        desired = max(14, min(34, len(str(column_name)) + 4))
-        for value in frame.iloc[:, col_idx - start_col].head(30):
-            desired = max(desired, min(34, len(str(value)) + 2))
-        ws.column_dimensions[get_column_letter(col_idx)].width = desired
-
-    return last_row + 2
+    return _write_styled_table_helper(ws, df, title, start_row, start_col)
 
 
 @st.cache_data(show_spinner=False)
@@ -1467,102 +1435,30 @@ def _downloadable_excel(
 
 
 def _coerce_float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    return _coerce_float_helper(value, default)
 
 
 def _build_opex_items(
     cost_rows: List[Dict[str, object]],
     default_inflation: float,
 ) -> Tuple[List[FixedOpexItem], List[VariableOpexItem]]:
-    """Aggregate operating expense overrides into fixed and variable item lists."""
-
-    fixed_map: Dict[str, Dict[str, float]] = {}
-    variable_map: Dict[str, Dict[str, float]] = {}
-
-    for row in cost_rows:
-        name = str(row.get("name", "")).strip()
-        if not name:
-            continue
-
-        inflation_rate = max(0.0, _coerce_float(row.get("inflation_rate"), default_inflation))
-        fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
-        variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
-
-        norm_name = name.lower()
-
-        if fixed_cost > 0:
-            entry = fixed_map.setdefault(
-                norm_name,
-                {"label": name, "cost": 0.0, "inflation": inflation_rate},
-            )
-            if not entry.get("label"):
-                entry["label"] = name
-            entry["cost"] += fixed_cost
-            entry["inflation"] = inflation_rate
-
-        if variable_cost > 0:
-            entry = variable_map.setdefault(
-                norm_name,
-                {"label": name, "cost": 0.0, "inflation": inflation_rate},
-            )
-            if not entry.get("label"):
-                entry["label"] = name
-            entry["cost"] += variable_cost
-            entry["inflation"] = inflation_rate
-
-    fixed_items = [
-        FixedOpexItem(
-            name=data["label"],
-            annual_cost=0.0,
-            inflation_rate=data["inflation"],
-            cost_per_mwh=data["cost"],
-        )
-        for data in sorted(fixed_map.values(), key=lambda entry: entry["label"].lower())
-    ]
-
-    variable_items = [
-        VariableOpexItem(
-            name=f"{data['label']} Variable",
-            cost_per_mwh=data["cost"],
-            escalation_rate=data["inflation"],
-        )
-        for data in sorted(variable_map.values(), key=lambda entry: entry["label"].lower())
-    ]
-
-    return fixed_items, variable_items
+    return _build_opex_items_helper(cost_rows, default_inflation)
 
 
 def _coerce_optional_float(value: object) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, str) and not value.strip():
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return _coerce_optional_float_helper(value)
 
 
 def _coerce_optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, str) and not value.strip():
-        return None
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
+    return _coerce_optional_int_helper(value)
 
 
 def _rows_from_tuple(data: Tuple[Tuple[object, ...], ...], fields: Tuple[str, ...]) -> List[Dict[str, object]]:
-    return [dict(zip(fields, row)) for row in data]
+    return _rows_from_tuple_helper(data, fields)
 
 
 def _tupleize(rows: List[Dict[str, object]], fields: Tuple[str, ...]) -> Tuple[Tuple[object, ...], ...]:
-    return tuple(tuple(row.get(field) for field in fields) for row in rows)
+    return _tupleize_helper(rows, fields)
 
 
 def _projection_year_bounds() -> Tuple[int, int]:
@@ -1601,110 +1497,15 @@ def _ensure_initial_investment_state() -> None:
 
 
 def _parse_spend_profile(value: object) -> List[float]:
-    """Convert a UI value into a spend profile list."""
-
-    tokens: List[float] = []
-    if isinstance(value, str):
-        for part in value.replace("%", "").split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                number = float(part)
-                if number > 1.0:
-                    number = number / 100.0
-                tokens.append(number)
-            except ValueError:
-                continue
-    elif isinstance(value, (list, tuple, np.ndarray)):
-        for item in value:
-            try:
-                number = float(item)
-                if number > 1.0:
-                    number = number / 100.0
-                tokens.append(number)
-            except (TypeError, ValueError):
-                continue
-
-    tokens = [t for t in tokens if t > 0]
-    if not tokens:
-        return [1.0]
-    return tokens
+    return _parse_spend_profile_helper(value)
 
 
 def _capex_item_from_row(row: Dict[str, object], start_year: int) -> CapexItem | None:
-    """Build a CapexItem from UI row data."""
-
-    amount = max(0.0, _coerce_float(row.get("acquisition")))
-    opening_balance = max(0.0, _coerce_float(row.get("net_book_value")))
-    if amount <= 0 and opening_balance <= 0:
-        return None
-
-    name = str(row.get("asset_type", "Asset")).strip() or "Asset"
-    method_value = str(row.get("method", "Straight-Line")).strip() or "Straight-Line"
-    if method_value.lower() not in {"straight-line", "declining balance"}:
-        method_value = "Straight-Line"
-
-    asset_year = int(row.get("year", start_year))
-    asset_life = max(1, int(round(_coerce_float(row.get("asset_life"), 1.0))))
-    depreciation_rate = max(0.0, min(1.0, _coerce_float(row.get("depreciation_rate", 0.0))))
-
-    months_offset = max(0, (asset_year - start_year) * 12)
-    spend_profile = [0.0] * months_offset + [1.0]
-    service_month = months_offset + 1
-
-    return CapexItem(
-        name=name,
-        amount=amount,
-        depreciation_years=asset_life,
-        spend_profile=spend_profile,
-        method=method_value,
-        opening_balance=opening_balance,
-        depreciation_rate=depreciation_rate,
-        service_month=service_month,
-    )
+    return _capex_item_from_row_helper(row, start_year)
 
 
 def _capex_item_from_initial(row: Dict[str, object], start_year: int) -> CapexItem | None:
-    """Convert an initial investment row into a CapexItem."""
-
-    amount = max(0.0, _coerce_float(row.get("amount")))
-    opening_balance = max(0.0, _coerce_float(row.get("opening_balance")))
-    if amount <= 0 and opening_balance <= 0:
-        return None
-
-    name = str(row.get("name", "Investment")).strip() or "Investment"
-    method_value = str(row.get("method", "Straight-Line")).strip() or "Straight-Line"
-    if method_value.lower() not in {"straight-line", "declining balance"}:
-        method_value = "Straight-Line"
-
-    depreciation_years = max(1, int(round(_coerce_float(row.get("depreciation_years", 1.0), 1.0))))
-    depreciation_rate = max(0.0, min(1.0, _coerce_float(row.get("depreciation_rate", 0.0))))
-
-    year_value = int(_coerce_float(row.get("year", start_year), start_year))
-    month_in_year = int(_coerce_float(row.get("month", 1), 1.0))
-    month_in_year = min(12, max(1, month_in_year))
-    if year_value < start_year:
-        year_value = start_year
-    service_month = int(_coerce_float(row.get("service_month", 1), 1.0))
-    if service_month <= 0:
-        service_month = (year_value - start_year) * 12 + month_in_year
-    target_month = max(1, service_month)
-
-    spend_profile_values = _parse_spend_profile(row.get("spend_profile"))
-    prefix_length = max(0, target_month - 1)
-    spend_profile = [0.0] * prefix_length + spend_profile_values
-
-    return CapexItem(
-        name=name,
-        amount=amount,
-        depreciation_years=depreciation_years,
-        spend_profile=spend_profile,
-        method=method_value,
-        opening_balance=opening_balance,
-        depreciation_rate=depreciation_rate,
-        service_month=max(1, service_month),
-    )
+    return _capex_item_from_initial_helper(row, start_year)
 
 
 def _sync_initial_investment_to_fixed_assets() -> None:
@@ -1772,122 +1573,11 @@ st.markdown(
 
 
 def _inject_app_theme() -> None:
-    st.markdown(
-        """
-        <style>
-        .stApp {
-            background:
-                radial-gradient(circle at top left, rgba(250, 204, 21, 0.18), transparent 32%),
-                radial-gradient(circle at top right, rgba(125, 211, 252, 0.18), transparent 28%),
-                linear-gradient(180deg, #fffdf4 0%, #f5f8fc 56%, #eef5f8 100%);
-        }
-        .block-container {
-            padding-top: 1.3rem;
-            padding-bottom: 3rem;
-            max-width: 1460px;
-        }
-        .designer-hero {
-            margin-bottom: 1.2rem;
-            padding: 1.8rem 1.9rem;
-            border-radius: 28px;
-            border: 1px solid rgba(202, 138, 4, 0.14);
-            background:
-                linear-gradient(135deg, rgba(255, 251, 214, 0.96), rgba(255, 255, 255, 0.94)),
-                linear-gradient(135deg, rgba(202, 138, 4, 0.05), rgba(8, 145, 178, 0.06));
-            box-shadow: 0 24px 48px rgba(15, 23, 42, 0.08);
-        }
-        .designer-kicker {
-            margin: 0 0 0.45rem 0;
-            font-size: 0.78rem;
-            letter-spacing: 0.16em;
-            text-transform: uppercase;
-            color: #a16207;
-            font-weight: 700;
-        }
-        .designer-title {
-            margin: 0;
-            font-size: clamp(2rem, 2.8vw, 3.15rem);
-            line-height: 1.02;
-            color: #0f172a;
-            font-weight: 800;
-        }
-        .designer-copy {
-            max-width: 56rem;
-            margin: 0.7rem 0 0 0;
-            color: #475569;
-            font-size: 1rem;
-            line-height: 1.6;
-        }
-        .designer-badges {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.55rem;
-            margin-top: 1rem;
-        }
-        .designer-badge {
-            padding: 0.42rem 0.78rem;
-            border-radius: 999px;
-            border: 1px solid rgba(15, 23, 42, 0.08);
-            background: rgba(255, 255, 255, 0.92);
-            color: #0f766e;
-            font-size: 0.82rem;
-            font-weight: 700;
-        }
-        div[data-baseweb="tab-list"] {
-            gap: 0.55rem;
-            margin-bottom: 1rem;
-        }
-        div[data-baseweb="tab-list"] button {
-            min-height: 3rem;
-            border-radius: 999px;
-            border: 1px solid rgba(15, 23, 42, 0.08);
-            background: rgba(255, 255, 255, 0.72);
-            color: #475569;
-            padding: 0.25rem 1rem;
-        }
-        div[data-baseweb="tab-list"] button[aria-selected="true"] {
-            background: linear-gradient(135deg, #ca8a04, #0891b2);
-            color: white;
-            border-color: transparent;
-            box-shadow: 0 12px 24px rgba(8, 145, 178, 0.16);
-        }
-        div[data-testid="stMetric"] {
-            border-radius: 20px;
-            border: 1px solid rgba(15, 23, 42, 0.08);
-            background: rgba(255, 255, 255, 0.88);
-            padding: 0.6rem 0.7rem;
-            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    _inject_app_theme_helper()
 
 
 def _render_model_hero() -> None:
-    badges = "".join(
-        f'<span class="designer-badge">{label}</span>'
-        for label in (
-            "Investor workbook",
-            "Project finance model",
-            "Energy and cost analytics",
-            "AI benchmark support",
-        )
-    )
-    st.markdown(
-        f"""
-        <section class="designer-hero">
-            <p class="designer-kicker">Infrastructure finance planning</p>
-            <h1 class="designer-title">Solar Farm Financial Model</h1>
-            <p class="designer-copy">
-                Bring revenue, operating cost, debt, and return analytics into a cleaner executive shell
-                with a presentation-ready workbook designed for sponsors, lenders, and investment committees.
-            </p>
-            <div class="designer-badges">{badges}</div>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
+    _render_model_hero_helper()
 
 
 def _add_workbook_overview_sheet(
@@ -1896,6 +1586,7 @@ def _add_workbook_overview_sheet(
     summary_tables: Dict[str, pd.DataFrame],
     assumptions: Assumptions,
 ) -> None:
+    return _add_workbook_overview_sheet_helper(wb, outputs, summary_tables, assumptions, MetricLabels)
     if "Overview" in wb.sheetnames:
         del wb["Overview"]
     ws = wb.create_sheet("Overview", 0)
@@ -2021,7 +1712,7 @@ GLOBAL_DEFAULTS: List[GenericTableRow] = [
 ]
 
 
-ENERGY_DEFAULTS: List[GenericTableRow] = [
+ENERGY_COMMON_DEFAULTS: List[GenericTableRow] = [
     {
         "id": "capacity_mw",
         "label": "Capacity (MW)",
@@ -2031,15 +1722,6 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "step": 0.5,
     },
     {
-        "id": "capacity_factor",
-        "label": "Capacity Factor",
-        "value": 0.145,
-        "input_type": "percent",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.005,
-    },
-    {
         "id": "degradation_rate",
         "label": "Annual Degradation",
         "value": 0.005,
@@ -2047,14 +1729,6 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "min": 0.0,
         "max": 0.10,
         "step": 0.001,
-    },
-    {
-        "id": "annual_hours",
-        "label": "Annual Hours",
-        "value": 8760,
-        "input_type": "number",
-        "min": 0.0,
-        "step": 24.0,
     },
     {
         "id": "panel_watt_dc",
@@ -2088,6 +1762,31 @@ ENERGY_DEFAULTS: List[GenericTableRow] = [
         "input_type": "number",
         "min": 0.0,
         "step": 1.0,
+    },
+]
+
+
+ENERGY_CAPACITY_FACTOR_DEFAULTS: List[GenericTableRow] = [
+    {
+        "id": "capacity_factor",
+        "label": "Capacity Factor",
+        "value": 0.145,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.005,
+    },
+]
+
+
+ENERGY_RESOURCE_HOURS_DEFAULTS: List[GenericTableRow] = [
+    {
+        "id": "annual_resource_hours",
+        "label": "Annual Resource Hours",
+        "value": round(0.145 * CALENDAR_HOURS_PER_YEAR, 1),
+        "input_type": "number",
+        "min": 0.0,
+        "step": 25.0,
     },
 ]
 
@@ -2160,46 +1859,35 @@ REVENUE_DEFAULTS: List[GenericTableRow] = [
 
 
 def _apply_sensitivity_ppa_rate(assumptions: Assumptions, multiplier: float) -> None:
-    assumptions.revenue.ppa.rate_curve.initial = max(
-        0.0, assumptions.revenue.ppa.rate_curve.initial * multiplier
-    )
+    _apply_sensitivity_ppa_rate_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_merchant_rate(assumptions: Assumptions, multiplier: float) -> None:
-    assumptions.revenue.merchant.rate_curve.initial = max(
-        0.0, assumptions.revenue.merchant.rate_curve.initial * multiplier
-    )
+    _apply_sensitivity_merchant_rate_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_rec_rate(assumptions: Assumptions, multiplier: float) -> None:
-    assumptions.revenue.rec.initial = max(0.0, assumptions.revenue.rec.initial * multiplier)
+    _apply_sensitivity_rec_rate_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_capacity_factor(assumptions: Assumptions, multiplier: float) -> None:
-    new_factor = assumptions.energy.capacity_factor * multiplier
-    assumptions.energy.capacity_factor = max(0.01, min(1.0, new_factor))
+    _apply_sensitivity_capacity_factor_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_capex(assumptions: Assumptions, multiplier: float) -> None:
-    for item in assumptions.capex_items:
-        item.amount = max(0.0, item.amount * multiplier)
+    _apply_sensitivity_capex_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_fixed_opex(assumptions: Assumptions, multiplier: float) -> None:
-    for item in assumptions.fixed_opex:
-        item.annual_cost = max(0.0, item.annual_cost * multiplier)
-        if hasattr(item, "cost_per_mwh"):
-            item.cost_per_mwh = max(0.0, item.cost_per_mwh * multiplier)
+    _apply_sensitivity_fixed_opex_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_variable_opex(assumptions: Assumptions, multiplier: float) -> None:
-    for item in assumptions.variable_opex:
-        item.cost_per_mwh = max(0.0, item.cost_per_mwh * multiplier)
+    _apply_sensitivity_variable_opex_helper(assumptions, multiplier)
 
 
 def _apply_sensitivity_discount_rate(assumptions: Assumptions, multiplier: float) -> None:
-    updated = assumptions.global_assumptions.discount_rate * multiplier
-    assumptions.global_assumptions.discount_rate = max(0.0, min(0.99, updated))
+    _apply_sensitivity_discount_rate_helper(assumptions, multiplier)
 
 
 SENSITIVITY_OPTIONS: Dict[str, Tuple[str, Callable[[Assumptions, float], None]]] = {
@@ -2427,42 +2115,42 @@ OPERATING_EXPENSE_DEFAULTS = [
     {
         "id": "insurance",
         "name": "Insurance",
-        "fixed_cost": 1.575,
+        "fixed_cost": 20_000.0,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "om_contract",
         "name": "O&M Service Contract",
-        "fixed_cost": 0.472,
+        "fixed_cost": 6_000.0,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "vegetation",
         "name": "Vegetation Management",
-        "fixed_cost": 0.787,
+        "fixed_cost": 10_000.0,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "g_and_a",
         "name": "General & Administrative",
-        "fixed_cost": 7.873,
+        "fixed_cost": 100_000.0,
         "variable_cost": 0.0,
         "inflation_rate": 0.03,
     },
     {
         "id": "sales_marketing",
         "name": "Sales & Marketing",
-        "fixed_cost": 0.669,
+        "fixed_cost": 8_500.0,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
     {
         "id": "research_development",
         "name": "Research & Development",
-        "fixed_cost": 0.602,
+        "fixed_cost": 7_650.0,
         "variable_cost": 0.0,
         "inflation_rate": 0.02,
     },
@@ -2863,6 +2551,29 @@ def _render_projection_horizon_section() -> Tuple[int, int]:
     return start_year, int(end_year)
 
 
+def _render_energy_input_mode_selector() -> str:
+    st.markdown("### Energy Input Method")
+    options = list(ENERGY_INPUT_MODE_OPTIONS.keys())
+    default_mode = str(st.session_state.get("energy_input_mode", "capacity_factor"))
+    if default_mode not in options:
+        default_mode = "capacity_factor"
+    selected_mode = st.selectbox(
+        "Production Driver",
+        options=options,
+        index=options.index(default_mode),
+        format_func=lambda option: ENERGY_INPUT_MODE_OPTIONS[option],
+        key="energy_input_mode",
+        help="Choose one production input path. Capacity factor, resource hours, and monthly MWh are mutually exclusive.",
+    )
+    if selected_mode == "capacity_factor":
+        st.caption("Annual hours are fixed at 8,760. Enter capacity factor directly.")
+    elif selected_mode == "resource_hours":
+        st.caption("Annual hours are fixed at 8,760. Resource hours are converted into implied capacity factor.")
+    else:
+        st.caption("Provide 12 monthly expected MWh values. The model derives the implied capacity factor.")
+    return str(selected_mode)
+
+
 PANEL_UNIT_COST_DEFAULT = 250.0
 
 
@@ -2932,8 +2643,9 @@ def _render_initial_investment_section() -> None:
                 "Depreciation Years",
                 value=float(row.get("depreciation_years", 1.0)),
                 key=f"{state_key}_life_{row_id}",
-                min_value=1.0,
+                min_value=0.0,
                 step=1.0,
+                help="Use 0 for non-depreciable items such as land.",
             )
             method_value = str(row.get("method", method_options[0]))
             if method_value not in method_options:
@@ -3117,12 +2829,12 @@ def _render_operating_expense_section() -> None:
                 key=f"{state_key}_name_{row_id}",
             )
             fixed_cost = col_fixed.number_input(
-                "Fixed Cost per MWh",
+                "Annual Fixed Cost",
                 value=float(row.get("fixed_cost", 0.0)),
                 key=f"{state_key}_fixed_{row_id}",
                 min_value=0.0,
-                step=0.01,
-                format="%.4f",
+                step=1000.0,
+                format="%.2f",
             )
             variable_cost = col_variable.number_input(
                 "Variable Cost per MWh",
@@ -3776,9 +3488,25 @@ def _render_assumption_controls() -> tuple[
     start_year, end_year = _render_projection_horizon_section()
     _render_label_value_table("Core Assumptions", "core_table", CORE_ASSUMPTION_DEFAULTS)
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
-    _render_label_value_table("Energy", "energy_table", ENERGY_DEFAULTS)
+    _render_label_value_table("Energy", "energy_table", ENERGY_COMMON_DEFAULTS)
+    energy_input_mode = _render_energy_input_mode_selector()
+    if energy_input_mode == "capacity_factor":
+        _render_label_value_table(
+            "Energy Driver",
+            "energy_capacity_factor_table",
+            ENERGY_CAPACITY_FACTOR_DEFAULTS,
+        )
+        monthly_generation_rows: List[Dict[str, object]] = []
+    elif energy_input_mode == "resource_hours":
+        _render_label_value_table(
+            "Energy Driver",
+            "energy_resource_table",
+            ENERGY_RESOURCE_HOURS_DEFAULTS,
+        )
+        monthly_generation_rows = []
+    else:
+        monthly_generation_rows = _render_monthly_generation_table()
     _render_label_value_table("Revenue Inputs", "revenue_table", REVENUE_DEFAULTS)
-    monthly_generation_rows = _render_monthly_generation_table()
     _render_initial_investment_section()
     _render_labour_structure_section()
     _render_operating_expense_section()
@@ -3814,9 +3542,19 @@ def _render_assumption_controls() -> tuple[
         "investor_share": float(_get_row_value("global_table", "investor_share", 0.95, float)),
         "owner_share": float(_get_row_value("global_table", "owner_share", 0.05, float)),
         "capacity_mw": float(_get_row_value("energy_table", "capacity_mw", 10.0, float)),
-        "capacity_factor": float(_get_row_value("energy_table", "capacity_factor", 0.145, float)),
+        "capacity_factor": float(
+            _get_row_value("energy_capacity_factor_table", "capacity_factor", 0.145, float)
+        ),
         "degradation_rate": float(_get_row_value("energy_table", "degradation_rate", 0.005, float)),
-        "annual_hours": float(_get_row_value("energy_table", "annual_hours", 8760, float)),
+        "annual_resource_hours": float(
+            _get_row_value(
+                "energy_resource_table",
+                "annual_resource_hours",
+                round(0.145 * CALENDAR_HOURS_PER_YEAR, 1),
+                float,
+            )
+        ),
+        "energy_input_mode": energy_input_mode,
         "panel_count": float(derived_panel_count),
         "panel_watt_dc": float(_get_row_value("energy_table", "panel_watt_dc", 550.0, float)),
         "panel_unit_cost": float(panel_unit_cost_input),
@@ -3965,10 +3703,17 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
 
     st.subheader("Energy")
     energy_cols = st.columns(4)
+    energy_input_mode = str(
+        getattr(energy_cfg, "input_mode", getattr(assumptions, "energy_input_mode", "capacity_factor"))
+    )
     energy_cols[0].metric("Capacity (MW)", f"{energy_cfg.capacity_mw:,.2f}")
     energy_cols[1].metric("Capacity Factor", _format_percentage(energy_cfg.capacity_factor))
     energy_cols[2].metric("Degradation Rate", _format_percentage(energy_cfg.degradation_rate))
-    energy_cols[3].metric("Annual Hours", f"{energy_cfg.annual_hours:,}")
+    energy_cols[3].metric("Input Mode", ENERGY_INPUT_MODE_OPTIONS.get(energy_input_mode, energy_input_mode))
+    st.caption(f"Annual hours are fixed at {int(CALENDAR_HOURS_PER_YEAR):,}.")
+    if energy_input_mode == "resource_hours":
+        annual_resource_hours = float(getattr(energy_cfg, "annual_resource_hours_input", 0.0) or 0.0)
+        st.metric("Annual Resource Hours", f"{annual_resource_hours:,.1f}")
 
     st.markdown("#### Monthly Production Profile")
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -4358,19 +4103,11 @@ def _render_sensitivity_configuration() -> List[Dict[str, object]]:
 
 
 def _simulate_outputs(base: Assumptions, modifier: Callable[[Assumptions], None]) -> ModelOutputs:
-    """Clone assumptions, apply a modifier, and return the resulting model outputs."""
-
-    scenario = copy.deepcopy(base)
-    modifier(scenario)
-    scenario_model = SolarFarmFinancialModel(scenario)
-    return scenario_model.run()
+    return _simulate_outputs_helper(base, modifier)
 
 
 def _simulate_metrics(base: Assumptions, modifier: Callable[[Assumptions], None]) -> Dict[str, float]:
-    """Clone assumptions, apply a modifier, and return the resulting metrics."""
-
-    scenario_outputs = _simulate_outputs(base, modifier)
-    return scenario_outputs.metrics
+    return _simulate_metrics_helper(base, modifier)
 
 
 def _goal_seek_value(outputs: ModelOutputs, source: str, metric: str, year: int | None) -> float:

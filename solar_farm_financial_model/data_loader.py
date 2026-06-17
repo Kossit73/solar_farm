@@ -88,7 +88,7 @@ def _default_assumptions() -> Assumptions:
         CapexItem("Mounting System", 1_600_000, depreciation_years=20, spend_profile=[0.5, 0.5]),
         CapexItem("Inverters", 1_776_000, depreciation_years=15, spend_profile=[0.5, 0.5]),
         CapexItem("Electrical & Wiring", 1_800_000, depreciation_years=20, spend_profile=[0.5, 0.5]),
-        CapexItem("Land Acquisition", 200_000, depreciation_years=20, spend_profile=[0.5, 0.5]),
+        CapexItem("Land Acquisition", 200_000, depreciation_years=0, spend_profile=[0.5, 0.5]),
         CapexItem("Permitting & Compliance", 100_000, depreciation_years=10, spend_profile=[0.5, 0.5]),
         CapexItem("Construction Labour", 500_000, depreciation_years=5, spend_profile=[0.5, 0.5]),
         CapexItem("Contingency", 1_177_608, depreciation_years=5, spend_profile=[0.5, 0.5]),

@@ -65,7 +65,7 @@ def capex_item_schedule(
             else:
                 method = "straight-line"
 
-        if method == "straight-line":
+        if method == "straight-line" and item.depreciation_years > 0:
             months_of_life = max(1, item.depreciation_years * 12)
             monthly_dep = depreciation_basis / months_of_life
             for n in range(months_of_life):
@@ -114,6 +114,7 @@ class SolarFarmFinancialModel:
 
     def run(self) -> ModelOutputs:
         """Execute the projection and return consolidated outputs."""
+        self.assumptions.validate()
         self._apply_panel_linkages()
 
         monthly = pd.DataFrame(index=self._timeline)
@@ -648,13 +649,19 @@ class SolarFarmFinancialModel:
         p90_energy = annual_energy * (1 - 1.282 * generation_sigma)
         covenant_breach_months = int((monthly["dscr"] < float(getattr(self.assumptions, "min_dscr_covenant", 1.20))).sum())
 
+        project_irr = irr(project_cash_flow)
+        equity_irr = irr(equity_cash_flow)
+        investor_irr = irr(investor_cash_flow)
+        owner_irr = irr(owner_cash_flow)
+        payback_months = payback_period(project_cash_flow)
+
         metrics = {
             "project_npv": npv(discount_rate, project_cash_flow),
-            "project_irr": irr(project_cash_flow) or float("nan"),
-            "equity_irr": irr(equity_cash_flow) or float("nan"),
-            "investor_irr": irr(investor_cash_flow) or float("nan"),
-            "owner_irr": irr(owner_cash_flow) or float("nan"),
-            "project_payback_months": payback_period(project_cash_flow) or float("nan"),
+            "project_irr": project_irr if project_irr is not None else float("nan"),
+            "equity_irr": equity_irr if equity_irr is not None else float("nan"),
+            "investor_irr": investor_irr if investor_irr is not None else float("nan"),
+            "owner_irr": owner_irr if owner_irr is not None else float("nan"),
+            "project_payback_months": payback_months if payback_months is not None else float("nan"),
             "min_dscr": float(dscr_series.min()) if not dscr_series.empty else float("nan"),
             "avg_dscr": float(dscr_series.mean()) if not dscr_series.empty else float("nan"),
             "capex_per_mw": total_capex / capacity_mw,
