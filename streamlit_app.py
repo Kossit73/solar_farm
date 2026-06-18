@@ -5568,7 +5568,10 @@ with tabs[0]:
     ) = _render_assumption_controls()
 
 monthly_generation_tuple = _tupleize(monthly_generation_rows, ("month", "expected_mwh"))
-labour_tuple = _tupleize(labour_rows, labour_tuple_fields((end_year - start_year) + 1))
+labour_tuple = _tupleize(
+    labour_rows,
+    labour_tuple_fields((int(override_dict["end_year"]) - int(override_dict["start_year"])) + 1),
+)
 initial_investment_tuple = _tupleize(
     initial_investment_rows,
     (
