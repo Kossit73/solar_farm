@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pandas as pd
+from openpyxl import Workbook
 
 from solar_farm_financial_model.data_loader import load_assumptions
+from solar_farm_financial_model.excel_reporting import append_comprehensive_workbook_sheets
 from solar_farm_financial_model.input_parsing import (
     CALENDAR_HOURS_PER_YEAR,
     apply_energy_input_mode,
@@ -74,13 +76,16 @@ def test_zero_irr_and_payback_are_preserved(monkeypatch) -> None:
             "energy_mwh": [0.0, 0.0],
             "dscr": [float("nan"), float("nan")],
             "debt_balance": [0.0, 0.0],
-            "revenue_total": [0.0, 0.0],
-            "depreciation": [0.0, 0.0],
-            "tax_rate": [0.25, 0.25],
-            "delta_working_capital": [0.0, 0.0],
-        },
-        index=index,
-    )
+                "revenue_total": [0.0, 0.0],
+                "depreciation": [0.0, 0.0],
+                "tax_rate": [0.25, 0.25],
+                "delta_working_capital": [0.0, 0.0],
+                "discount_rate_monthly": [0.0, 0.0],
+                "fcff_present_value": [0.0, 0.0],
+                "risk_total_premium": [0.0, 0.0],
+            },
+            index=index,
+        )
 
     monkeypatch.setattr(model_module, "irr", lambda _: 0.0)
     monkeypatch.setattr(model_module, "payback_period", lambda _: 0)
@@ -125,3 +130,55 @@ def test_apply_energy_input_mode_monthly_expected_derives_capacity_factor() -> N
     assert energy.energy_model_mode == "monthly_expected_mwh"
     assert list(energy.monthly_expected_mwh or []) == [365.0] * 12
     assert energy.capacity_factor == (365.0 * 12) / (5.0 * CALENDAR_HOURS_PER_YEAR)
+
+
+def test_comprehensive_workbook_export_includes_full_solar_sheet_set() -> None:
+    assumptions = load_assumptions()
+    outputs = SolarFarmFinancialModel(assumptions).run()
+    workbook = Workbook()
+
+    append_comprehensive_workbook_sheets(
+        workbook,
+        outputs,
+        assumptions,
+        {
+            "labour_schedule": pd.DataFrame(
+                [
+                    {
+                        "role": "Operations Technician",
+                        "monthly_cost_per_fte": 4500.0,
+                        "Year 1": 2.0,
+                        "Year 2": 2.1,
+                    }
+                ]
+            )
+        },
+    )
+
+    expected_sheets = {
+        "01_Monthly_Financials",
+        "02_Annual_Financials",
+        "03_Annual_Performance",
+        "04_Annual_Position",
+        "05_Annual_Cash_Flow",
+        "06_Revenue_Schedule",
+        "07_OPEX_Schedule",
+        "08_Working_Capital",
+        "09_CAPEX_Depreciation",
+        "10_Financing_Cash",
+        "11_Debt_Schedule",
+        "12_Asset_Schedule",
+        "13_Global_Assumptions",
+        "14_Energy_Assumptions",
+        "15_Revenue_Assumptns",
+        "16_CAPEX_Assumptions",
+        "17_Fixed_OPEX_Assump",
+        "18_Var_OPEX_Assump",
+        "19_Receivables_WC",
+        "20_Inventory_WC",
+        "21_Tax_Schedule",
+        "22_Risk_Schedule",
+        "24_Labour_Schedule",
+    }
+
+    assert expected_sheets.issubset(set(workbook.sheetnames))

@@ -38,6 +38,7 @@ from solar_farm_financial_model.analytics_helpers import (
 from solar_farm_financial_model.data_loader import load_assumptions
 from solar_farm_financial_model.excel_reporting import (
     add_workbook_overview_sheet as _add_workbook_overview_sheet_helper,
+    append_comprehensive_workbook_sheets as _append_comprehensive_workbook_sheets_helper,
     excel_title as _excel_title_helper,
     write_styled_table as _write_styled_table_helper,
 )
@@ -771,6 +772,7 @@ def _downloadable_excel(
     outputs: ModelOutputs,
     summary_tables: Dict[str, pd.DataFrame],
     assumptions: Assumptions,
+    workbook_support_tables: Dict[str, pd.DataFrame] | None = None,
 ) -> bytes:
     """Create an investor-ready workbook aligned to Key Metrics, Financials, and Key Analytics tabs."""
 
@@ -1440,6 +1442,7 @@ def _downloadable_excel(
     ws_analytics.add_chart(be_chart, f"A{row}")
 
     _add_workbook_overview_sheet(wb, outputs, summary_tables, assumptions)
+    _append_comprehensive_workbook_sheets(wb, outputs, assumptions, workbook_support_tables)
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -1644,6 +1647,15 @@ def _add_workbook_overview_sheet(
     ws.column_dimensions["D"].width = 60
     ws.freeze_panes = "A6"
     ws.sheet_view.showGridLines = False
+
+
+def _append_comprehensive_workbook_sheets(
+    wb: Workbook,
+    outputs: ModelOutputs,
+    assumptions: Assumptions,
+    workbook_support_tables: Dict[str, pd.DataFrame] | None = None,
+) -> None:
+    _append_comprehensive_workbook_sheets_helper(wb, outputs, assumptions, workbook_support_tables)
 
 
 GenericTableRow = Dict[str, object]
@@ -4337,12 +4349,62 @@ def _render_data_and_downloads(
     st.markdown("#### Metrics")
     st.dataframe(summary_tables["metrics"], use_container_width=True)
 
+
+def _build_workbook_support_tables() -> Dict[str, pd.DataFrame]:
+    support_tables: Dict[str, pd.DataFrame] = {}
+
+    labour_years = _labour_year_columns()
+    labour_rows = normalize_labour_rows(st.session_state.get("labour_structure", []), labour_years)
+    if labour_rows:
+        support_tables["labour_schedule"] = pd.DataFrame(labour_rows)
+
+    fixed_assets_input = pd.DataFrame(copy.deepcopy(st.session_state.get("fixed_assets_schedule", [])))
+    if not fixed_assets_input.empty:
+        support_tables["fixed_assets_input"] = fixed_assets_input
+
+    sensitivity_rows = pd.DataFrame(copy.deepcopy(st.session_state.get(SENSITIVITY_STATE_KEY, [])))
+    if not sensitivity_rows.empty:
+        support_tables["sensitivity_config"] = sensitivity_rows
+
+    goal_seek_rows = pd.DataFrame(copy.deepcopy(st.session_state.get(GOAL_SEEK_STATE_KEY, [])))
+    if not goal_seek_rows.empty:
+        support_tables["goal_seek_config"] = goal_seek_rows
+
+    monte_carlo_config = copy.deepcopy(st.session_state.get(MONTE_CARLO_STATE_KEY, {}))
+    monte_carlo_drivers = pd.DataFrame(monte_carlo_config.get("drivers", []))
+    if not monte_carlo_drivers.empty:
+        support_tables["monte_carlo_drivers"] = monte_carlo_drivers
+    monte_carlo_metrics = monte_carlo_config.get("metrics", [])
+    if monte_carlo_metrics:
+        support_tables["monte_carlo_metrics"] = pd.DataFrame({"metric": monte_carlo_metrics})
+
+    break_even_inputs = pd.DataFrame(copy.deepcopy(st.session_state.get(BREAK_EVEN_STATE_KEY, [])))
+    if not break_even_inputs.empty:
+        support_tables["break_even_inputs"] = break_even_inputs
+
+    return support_tables
+
+
+def _workbook_support_signature(workbook_support_tables: Dict[str, pd.DataFrame]) -> Tuple[Tuple[object, ...], ...]:
+    signature: List[Tuple[object, ...]] = []
+    for name in sorted(workbook_support_tables):
+        frame = workbook_support_tables[name].copy()
+        if frame.empty:
+            signature.append((name, 0, tuple(), 0))
+            continue
+        normalised = frame.fillna("").astype(str)
+        frame_hash = int(pd.util.hash_pandas_object(normalised, index=True).sum())
+        signature.append((name, len(normalised), tuple(str(column) for column in normalised.columns), frame_hash))
+    return tuple(signature)
+
+
 def _render_downloads(
     outputs: ModelOutputs, summary_tables: Dict[str, pd.DataFrame], assumptions: Assumptions
 ) -> None:
     """Render export actions for the current model run."""
     st.write("Export polished presentation outputs for offline analysis.")
     workbook_key = "investor_workbook_bytes"
+    workbook_support_tables = _build_workbook_support_tables()
     workbook_signature = (
         float(outputs.metrics.get("project_npv", float("nan"))),
         float(outputs.metrics.get("project_irr", float("nan"))),
@@ -4350,12 +4412,18 @@ def _render_downloads(
         float(outputs.metrics.get("investor_irr", float("nan"))),
         float(outputs.metrics.get("owner_irr", float("nan"))),
         float(outputs.metrics.get("project_payback_months", float("nan"))),
+        _workbook_support_signature(workbook_support_tables),
     )
     signature_key = "investor_workbook_signature"
 
     if st.button("Prepare Investor Workbook", key="prepare_investor_workbook"):
         with st.spinner("Preparing workbook (optimized cache + reduced simulation load)..."):
-            st.session_state[workbook_key] = _downloadable_excel(outputs, summary_tables, assumptions)
+            st.session_state[workbook_key] = _downloadable_excel(
+                outputs,
+                summary_tables,
+                assumptions,
+                workbook_support_tables,
+            )
             st.session_state[signature_key] = workbook_signature
 
     if st.session_state.get(signature_key) == workbook_signature and workbook_key in st.session_state:
