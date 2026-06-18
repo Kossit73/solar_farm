@@ -166,6 +166,7 @@ def _normalize_labour_row(raw_row: Dict[str, object], year_columns: Sequence[str
         target_sku_id = ""
 
     normalized = {
+        "id": str(raw_row.get("id", "")).strip(),
         "role": str(raw_row.get("role", "")).strip(),
         "allocation_driver": str(raw_row.get("allocation_driver", "mwh")).strip() or "mwh",
         "scope": str(raw_row.get("scope", "global")).strip() or "global",

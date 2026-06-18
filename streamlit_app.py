@@ -2422,6 +2422,36 @@ def _schedule_increment_state_key(state_key: str) -> str:
     return f"{state_key}_annual_increment_percent"
 
 
+def _ensure_labour_row_ids(state_key: str) -> None:
+    rows = st.session_state.get(state_key, [])
+    seen_ids: set[str] = set()
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        if not row_id or row_id in seen_ids:
+            row_id = uuid.uuid4().hex
+            row["id"] = row_id
+        seen_ids.add(row_id)
+
+
+def _apply_labour_yearly_increment(
+    rows: List[Dict[str, object]],
+    year_columns: List[str],
+    increment_percent: float,
+) -> List[Dict[str, object]]:
+    if len(year_columns) < 2:
+        return copy.deepcopy(rows)
+
+    multiplier = 1.0 + (increment_percent / 100.0)
+    updated_rows = copy.deepcopy(rows)
+    for row in updated_rows:
+        for index in range(1, len(year_columns)):
+            prior_column = year_columns[index - 1]
+            current_column = year_columns[index]
+            prior_value = _coerce_float(row.get(prior_column))
+            row[current_column] = _clamp_numeric(prior_value * multiplier, 0.0, None)
+    return updated_rows
+
+
 def _clamp_numeric(value: float, minimum: float | None = None, maximum: float | None = None) -> float:
     if minimum is not None:
         value = max(minimum, value)
@@ -2921,55 +2951,191 @@ def _render_labour_structure_section() -> None:
         st.session_state[state_key] = copy.deepcopy(default_labour_rows(year_columns))
     normalized_rows = normalize_labour_rows(current_rows, year_columns)
     st.session_state[state_key] = copy.deepcopy(normalized_rows)
+    _ensure_labour_row_ids(state_key)
+    rows = st.session_state[state_key]
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
 
-    labour_df = pd.DataFrame(normalized_rows)
-    column_order = list(LABOUR_BASE_FIELDS) + year_columns
-    for column in column_order:
-        if column not in labour_df.columns:
-            labour_df[column] = 0.0 if column in year_columns or column not in {"role", "allocation_driver", "scope", "target_sku_id"} else ""
-    labour_df = labour_df[column_order]
+    row_labels = {}
+    for row in rows:
+        row_id = str(row.get("id"))
+        role = str(row.get("role", "Labour")).strip() or "Labour"
+        year_one = _coerce_float(row.get(year_columns[0])) if year_columns else 0.0
+        row_labels[row_id] = f"{role} | {year_columns[0] if year_columns else 'Year 1'} {year_one:.2f} FTE"
 
-    numeric_columns = {
-        "monthly_cost_per_fte",
-        "annual_raise_pct",
-        "benefits_pct",
-        "payroll_tax_pct",
-        "overtime_pct",
-        "capacity_liters_per_fte_month",
-        *year_columns,
-    }
-    for column in numeric_columns:
-        labour_df[column] = pd.to_numeric(labour_df[column], errors="coerce").fillna(0.0)
-
-    edited_df = st.data_editor(
-        labour_df,
-        key=f"{state_key}_editor",
-        hide_index=True,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "role": st.column_config.TextColumn("Role"),
-            "allocation_driver": st.column_config.TextColumn("Allocation Driver"),
-            "scope": st.column_config.TextColumn("Scope"),
-            "target_sku_id": st.column_config.TextColumn("Target SKU ID"),
-            "monthly_cost_per_fte": st.column_config.NumberColumn("Monthly Cost / FTE", min_value=0.0, step=100.0, format="%.2f"),
-            "annual_raise_pct": st.column_config.NumberColumn("Annual Raise %", step=0.01, format="%.4f"),
-            "benefits_pct": st.column_config.NumberColumn("Benefits %", step=0.01, format="%.4f"),
-            "payroll_tax_pct": st.column_config.NumberColumn("Payroll Tax %", step=0.01, format="%.4f"),
-            "overtime_pct": st.column_config.NumberColumn("Overtime %", step=0.01, format="%.4f"),
-            "capacity_liters_per_fte_month": st.column_config.NumberColumn(
-                "Capacity / FTE / Month",
-                min_value=0.0,
-                step=100.0,
-                format="%.2f",
-            ),
-            **{
-                column: st.column_config.NumberColumn(column, min_value=0.0, step=0.25, format="%.2f")
-                for column in year_columns
-            },
-        },
+    action_cols = st.columns([1.3, 1.4, 3.6, 1.1, 1.1])
+    increment_key = _schedule_increment_state_key(state_key)
+    st.session_state.setdefault(increment_key, 0.0)
+    increment_percent = action_cols[0].number_input(
+        "Annual Increment (%)",
+        key=increment_key,
+        min_value=-100.0,
+        step=0.5,
+        format="%.2f",
+        help="Apply a yearly increment to the Year 2..N labour schedule for every row using the prior year as the base.",
     )
-    st.session_state[state_key] = normalize_labour_rows(edited_df.to_dict("records"), year_columns)
+    if action_cols[1].button("Apply Yearly Increment", key=f"{state_key}_apply_yearly_increment"):
+        st.session_state[state_key] = _apply_labour_yearly_increment(st.session_state[state_key], year_columns, float(increment_percent))
+        rows = st.session_state[state_key]
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = editing_row_id if editing_row_id in row_options else (row_options[0] if row_options else "")
+
+    if row_options:
+        editing_row_id = action_cols[2].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: row_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[2].caption("Edit row")
+        editing_row_id = ""
+
+    if action_cols[3].button("Remove", key=f"{state_key}_remove_selected", disabled=not bool(editing_row_id)):
+        st.session_state[state_key] = [row for row in st.session_state[state_key] if str(row.get("id")) != editing_row_id]
+        remaining_ids = [str(row.get("id")) for row in st.session_state[state_key]]
+        st.session_state[_schedule_edit_state_key(state_key)] = remaining_ids[0] if remaining_ids else None
+        rows = st.session_state[state_key]
+        row_options = remaining_ids
+        editing_row_id = remaining_ids[0] if remaining_ids else ""
+
+    if action_cols[4].button("Add Row", key=f"{state_key}_add_row"):
+        new_row = normalize_labour_rows(
+            [
+                {
+                    "id": uuid.uuid4().hex,
+                    "role": "New Role",
+                    "allocation_driver": "mwh",
+                    "scope": "global",
+                    "target_sku_id": "",
+                    "monthly_cost_per_fte": 0.0,
+                    "annual_raise_pct": 0.0,
+                    "benefits_pct": 0.0,
+                    "payroll_tax_pct": 0.0,
+                    "overtime_pct": 0.0,
+                    "capacity_liters_per_fte_month": 0.0,
+                    **{column: 0.0 for column in year_columns},
+                }
+            ],
+            year_columns,
+        )[0]
+        st.session_state[state_key].append(new_row)
+        st.session_state[_schedule_edit_state_key(state_key)] = str(new_row.get("id"))
+        rows = st.session_state[state_key]
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(new_row.get("id"))
+
+    st.caption("Edit one labour row at a time; yearly increment applies across the Year columns for all rows.")
+
+    updated_rows: List[Dict[str, object]] = []
+    for row in rows:
+        row_id = str(row.get("id"))
+        updated_row = copy.deepcopy(row)
+        if editing_row_id == row_id:
+            with st.container(border=True):
+                st.markdown(f"**Editing:** {row_labels.get(row_id, row_id)}")
+                identity_cols = st.columns([1.5, 1.1, 1.1, 1.2])
+                updated_row["role"] = identity_cols[0].text_input(
+                    "Role",
+                    value=str(row.get("role", "")),
+                    key=f"{state_key}_role_{row_id}",
+                )
+                updated_row["allocation_driver"] = identity_cols[1].text_input(
+                    "Allocation Driver",
+                    value=str(row.get("allocation_driver", "mwh")),
+                    key=f"{state_key}_allocation_{row_id}",
+                )
+                updated_row["scope"] = identity_cols[2].text_input(
+                    "Scope",
+                    value=str(row.get("scope", "global")),
+                    key=f"{state_key}_scope_{row_id}",
+                )
+                updated_row["target_sku_id"] = identity_cols[3].text_input(
+                    "Target SKU ID",
+                    value=str(row.get("target_sku_id", "")),
+                    key=f"{state_key}_target_{row_id}",
+                )
+
+                cost_cols = st.columns([1.15, 1, 1, 1, 1, 1.2])
+                updated_row["monthly_cost_per_fte"] = cost_cols[0].number_input(
+                    "Monthly Cost / FTE",
+                    value=float(row.get("monthly_cost_per_fte", 0.0)),
+                    key=f"{state_key}_monthly_cost_{row_id}",
+                    min_value=0.0,
+                    step=100.0,
+                    format="%.2f",
+                )
+                updated_row["annual_raise_pct"] = cost_cols[1].number_input(
+                    "Annual Raise %",
+                    value=float(row.get("annual_raise_pct", 0.0)),
+                    key=f"{state_key}_annual_raise_{row_id}",
+                    step=0.01,
+                    format="%.4f",
+                )
+                updated_row["benefits_pct"] = cost_cols[2].number_input(
+                    "Benefits %",
+                    value=float(row.get("benefits_pct", 0.0)),
+                    key=f"{state_key}_benefits_{row_id}",
+                    step=0.01,
+                    format="%.4f",
+                )
+                updated_row["payroll_tax_pct"] = cost_cols[3].number_input(
+                    "Payroll Tax %",
+                    value=float(row.get("payroll_tax_pct", 0.0)),
+                    key=f"{state_key}_payroll_tax_{row_id}",
+                    step=0.01,
+                    format="%.4f",
+                )
+                updated_row["overtime_pct"] = cost_cols[4].number_input(
+                    "Overtime %",
+                    value=float(row.get("overtime_pct", 0.0)),
+                    key=f"{state_key}_overtime_{row_id}",
+                    step=0.01,
+                    format="%.4f",
+                )
+                updated_row["capacity_liters_per_fte_month"] = cost_cols[5].number_input(
+                    "Capacity / FTE / Month",
+                    value=float(row.get("capacity_liters_per_fte_month", 0.0)),
+                    key=f"{state_key}_capacity_{row_id}",
+                    min_value=0.0,
+                    step=100.0,
+                    format="%.2f",
+                )
+
+                st.markdown("**Yearly Headcount Schedule**")
+                chunk_size = 5
+                for chunk_start in range(0, len(year_columns), chunk_size):
+                    chunk = year_columns[chunk_start : chunk_start + chunk_size]
+                    year_input_cols = st.columns(len(chunk))
+                    for column_index, column in enumerate(chunk):
+                        updated_row[column] = year_input_cols[column_index].number_input(
+                            column,
+                            value=float(row.get(column, 0.0)),
+                            key=f"{state_key}_{column.replace(' ', '_').lower()}_{row_id}",
+                            min_value=0.0,
+                            step=0.25,
+                            format="%.2f",
+                        )
+        updated_rows.append(updated_row)
+
+    st.session_state[state_key] = normalize_labour_rows(updated_rows, year_columns)
+
+    if st.session_state[state_key]:
+        labour_df = pd.DataFrame(st.session_state[state_key])
+        display_columns = ["role", "monthly_cost_per_fte", "annual_raise_pct", *year_columns]
+        labour_df = labour_df[[column for column in display_columns if column in labour_df.columns]]
+        labour_df = labour_df.rename(
+            columns={
+                "role": "Role",
+                "monthly_cost_per_fte": "Monthly Cost / FTE",
+                "annual_raise_pct": "Annual Raise %",
+            }
+        )
+        st.dataframe(labour_df, use_container_width=True, height=min(420, 120 + (len(labour_df) * 35)))
 
 
 def _render_operating_expense_section() -> None:
