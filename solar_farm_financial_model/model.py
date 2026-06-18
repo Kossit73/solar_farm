@@ -8,8 +8,15 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from .metrics import irr, npv, payback_period
-from .schemas import Assumptions, CapexItem, DebtFacility, InventoryPayableSettings, ReceivableSettings
+from .metrics import discount_factors_from_periodic_rates, irr, npv_variable, payback_period
+from .schemas import (
+    Assumptions,
+    CapexItem,
+    DebtFacility,
+    InventoryPayableSettings,
+    ReceivableSettings,
+    RiskScheduleEntry,
+)
 
 
 def capex_item_schedule(
@@ -215,14 +222,23 @@ class SolarFarmFinancialModel:
         monthly["equity_distribution"] = monthly["cash_after_sweep"].clip(lower=0)
         monthly["equity_cash_flow"] = -monthly["equity_contribution"] + monthly["equity_distribution"]
 
+        distribution = self.assumptions.global_assumptions.distribution.normalized()
+        monthly["investor_cash_flow"] = monthly["equity_cash_flow"] * distribution.investor_share
+        monthly["owner_cash_flow"] = monthly["equity_cash_flow"] * distribution.owner_share
+        monthly = monthly.join(self._compute_risk_schedule())
+
         terminal_cash = self._compute_terminal_value(monthly)
         if terminal_cash is not None:
             monthly.iloc[-1, monthly.columns.get_loc("fcff")] += terminal_cash["fcff"]
             monthly.iloc[-1, monthly.columns.get_loc("equity_cash_flow")] += terminal_cash["equity"]
+            monthly.iloc[-1, monthly.columns.get_loc("investor_cash_flow")] += (
+                terminal_cash["equity"] * distribution.investor_share
+            )
+            monthly.iloc[-1, monthly.columns.get_loc("owner_cash_flow")] += (
+                terminal_cash["equity"] * distribution.owner_share
+            )
 
-        distribution = self.assumptions.global_assumptions.distribution.normalized()
-        monthly["investor_cash_flow"] = monthly["equity_cash_flow"] * distribution.investor_share
-        monthly["owner_cash_flow"] = monthly["equity_cash_flow"] * distribution.owner_share
+        monthly = self._apply_risk_discounting(monthly)
         monthly["sources_total"] = (
             monthly["debt_draw"]
             + monthly["equity_contribution"]
@@ -608,7 +624,7 @@ class SolarFarmFinancialModel:
 
         if method == "gordon":
             growth = float(getattr(self.assumptions, "terminal_growth_rate", 0.0))
-            discount = assumptions.discount_rate
+            discount = float(monthly["discount_rate_annual"].iloc[-1]) if "discount_rate_annual" in monthly else assumptions.discount_rate
             if discount <= growth:
                 enterprise_value = trailing_ebitda * assumptions.exit_multiple
             else:
@@ -626,7 +642,7 @@ class SolarFarmFinancialModel:
 
     # ------------------------------------------------------------------
     def _compute_metrics(self, monthly: pd.DataFrame) -> Dict[str, float]:
-        discount_rate = self.assumptions.global_assumptions.discount_rate
+        monthly_discount_rates = monthly["discount_rate_monthly"].to_numpy(dtype=float)
         project_cash_flow = monthly["fcff"].values
         equity_cash_flow = monthly["equity_cash_flow"].values
         investor_cash_flow = monthly["investor_cash_flow"].values
@@ -640,8 +656,8 @@ class SolarFarmFinancialModel:
         negative_equity = -float(monthly.loc[monthly["equity_cash_flow"] < 0, "equity_cash_flow"].sum())
         positive_equity = float(monthly.loc[monthly["equity_cash_flow"] > 0, "equity_cash_flow"].sum())
         equity_multiple = positive_equity / negative_equity if negative_equity > 0 else float("nan")
-        llcr, plcr = self._compute_coverage_ratios(monthly, discount_rate)
-        downside_npvs = self._compute_downside_npv_distribution(monthly, discount_rate)
+        llcr, plcr = self._compute_coverage_ratios(monthly, monthly_discount_rates)
+        downside_npvs = self._compute_downside_npv_distribution(monthly, monthly_discount_rates)
         generation_sigma = max(0.0, float(getattr(self.assumptions, "generation_uncertainty", 0.10)))
         annual_energy = total_energy / max(1.0, self.assumptions.global_assumptions.forecast_months / 12.0)
         p50_energy = annual_energy
@@ -656,7 +672,7 @@ class SolarFarmFinancialModel:
         payback_months = payback_period(project_cash_flow)
 
         metrics = {
-            "project_npv": npv(discount_rate, project_cash_flow),
+            "project_npv": float(monthly["fcff_present_value"].sum()),
             "project_irr": project_irr if project_irr is not None else float("nan"),
             "equity_irr": equity_irr if equity_irr is not None else float("nan"),
             "investor_irr": investor_irr if investor_irr is not None else float("nan"),
@@ -677,12 +693,14 @@ class SolarFarmFinancialModel:
             "annual_energy_p75_mwh": p75_energy,
             "annual_energy_p90_mwh": p90_energy,
             "covenant_breach_months": covenant_breach_months,
+            "avg_risk_premium": float(monthly["risk_total_premium"].mean()),
+            "peak_risk_premium": float(monthly["risk_total_premium"].max()),
         }
         return metrics
 
     # ------------------------------------------------------------------
     def _build_annual_summary(self, monthly: pd.DataFrame) -> pd.DataFrame:
-        annual = monthly.resample("YE").agg(
+        annual = monthly.resample("Y").agg(
             {
                 "revenue_total": "sum",
                 "total_opex": "sum",
@@ -712,6 +730,15 @@ class SolarFarmFinancialModel:
                 "sources_total": "sum",
                 "uses_total": "sum",
                 "sources_uses_gap": "sum",
+                "risk_inherent": "mean",
+                "risk_climate": "mean",
+                "risk_political": "mean",
+                "risk_total_premium": "mean",
+                "discount_rate_annual": "mean",
+                "fcff_present_value": "sum",
+                "equity_cash_flow_present_value": "sum",
+                "investor_cash_flow_present_value": "sum",
+                "owner_cash_flow_present_value": "sum",
             }
         )
         annual["dscr"] = np.where(
@@ -759,8 +786,7 @@ class SolarFarmFinancialModel:
             req[i] = float(arr[i:end].mean()) if end > i else 0.0
         return pd.Series(req, index=self._timeline)
 
-    def _compute_coverage_ratios(self, monthly: pd.DataFrame, discount_rate: float) -> Tuple[float, float]:
-        periodic = (1 + discount_rate) ** (1 / 12) - 1
+    def _compute_coverage_ratios(self, monthly: pd.DataFrame, monthly_discount_rates: np.ndarray) -> Tuple[float, float]:
         cfads = monthly["cfads"].fillna(0.0).to_numpy()
         debt_balance = monthly["debt_balance"].fillna(0.0).to_numpy()
         debt_service = monthly["debt_service"].fillna(0.0).to_numpy()
@@ -769,13 +795,14 @@ class SolarFarmFinancialModel:
             return float("nan"), float("nan")
         loan_mask = debt_service > 0
         cfads_loan = cfads[loan_mask] if loan_mask.any() else np.array([])
+        rates_loan = monthly_discount_rates[loan_mask] if loan_mask.any() else np.array([])
         if cfads_loan.size == 0:
             return float("nan"), float("nan")
-        llcr = npv(periodic, cfads_loan) / max_debt
-        plcr = npv(periodic, cfads) / max_debt
+        llcr = npv_variable(rates_loan, cfads_loan) / max_debt
+        plcr = npv_variable(monthly_discount_rates, cfads) / max_debt
         return float(llcr), float(plcr)
 
-    def _compute_downside_npv_distribution(self, monthly: pd.DataFrame, discount_rate: float) -> List[float]:
+    def _compute_downside_npv_distribution(self, monthly: pd.DataFrame, monthly_discount_rates: np.ndarray) -> List[float]:
         rng = np.random.default_rng(42)
         samples: List[float] = []
         for _ in range(120):
@@ -793,5 +820,45 @@ class SolarFarmFinancialModel:
                 - monthly["capex"] * capex_mult
                 - monthly["delta_working_capital"]
             )
-            samples.append(float(npv(discount_rate, stressed_fcff.to_numpy())))
+            samples.append(float(npv_variable(monthly_discount_rates, stressed_fcff.to_numpy())))
         return samples
+
+    def _compute_risk_schedule(self) -> pd.DataFrame:
+        base_discount_rate = max(0.0, float(self.assumptions.global_assumptions.discount_rate))
+        entries = sorted(
+            list(getattr(self.assumptions, "risk_schedule", []) or []),
+            key=lambda entry: int(entry.year),
+        )
+        current_entry = entries[0] if entries else RiskScheduleEntry(year=self._timeline[0].year)
+        next_idx = 1
+
+        rows: List[Dict[str, float]] = []
+        for timestamp in self._timeline:
+            current_year = int(timestamp.year)
+            while next_idx < len(entries) and int(entries[next_idx].year) <= current_year:
+                current_entry = entries[next_idx]
+                next_idx += 1
+            total_premium = max(0.0, float(current_entry.total_premium))
+            annual_discount_rate = min(0.99, base_discount_rate + total_premium)
+            rows.append(
+                {
+                    "risk_inherent": max(0.0, float(current_entry.inherent_risk)),
+                    "risk_climate": max(0.0, float(current_entry.climate_risk)),
+                    "risk_political": max(0.0, float(current_entry.political_risk)),
+                    "risk_total_premium": total_premium,
+                    "discount_rate_annual": annual_discount_rate,
+                    "discount_rate_monthly": (1.0 + annual_discount_rate) ** (1.0 / 12.0) - 1.0,
+                }
+            )
+        return pd.DataFrame(rows, index=self._timeline)
+
+    def _apply_risk_discounting(self, monthly: pd.DataFrame) -> pd.DataFrame:
+        discount_factors = discount_factors_from_periodic_rates(
+            monthly["discount_rate_monthly"].to_numpy(dtype=float)
+        )
+        monthly["discount_factor"] = discount_factors
+        monthly["fcff_present_value"] = monthly["fcff"] / monthly["discount_factor"]
+        monthly["equity_cash_flow_present_value"] = monthly["equity_cash_flow"] / monthly["discount_factor"]
+        monthly["investor_cash_flow_present_value"] = monthly["investor_cash_flow"] / monthly["discount_factor"]
+        monthly["owner_cash_flow_present_value"] = monthly["owner_cash_flow"] / monthly["discount_factor"]
+        return monthly

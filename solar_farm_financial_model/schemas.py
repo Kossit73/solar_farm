@@ -194,6 +194,21 @@ class TaxRateSchedule:
 
 
 @dataclass
+class RiskScheduleEntry:
+    """Explicit annual risk premia that can vary by projection year."""
+
+    year: int
+    name: str = "Baseline"
+    inherent_risk: float = 0.0
+    climate_risk: float = 0.0
+    political_risk: float = 0.0
+
+    @property
+    def total_premium(self) -> float:
+        return max(0.0, self.inherent_risk) + max(0.0, self.climate_risk) + max(0.0, self.political_risk)
+
+
+@dataclass
 class DistributionSplit:
     """Equity ownership split between investor and owner."""
 
@@ -254,6 +269,7 @@ class Assumptions:
     receivable_settings: Sequence[ReceivableSettings] = field(default_factory=list)
     inventory_settings: Sequence[InventoryPayableSettings] = field(default_factory=list)
     tax_schedule: Sequence[TaxRateSchedule] = field(default_factory=list)
+    risk_schedule: Sequence[RiskScheduleEntry] = field(default_factory=list)
     terminal_growth_rate: float = 0.0
 
     def validate(self) -> None:
@@ -273,5 +289,6 @@ class Assumptions:
             "receivables": list(self.receivable_settings),
             "inventory": list(self.inventory_settings),
             "tax_schedule": list(self.tax_schedule),
+            "risk_schedule": list(self.risk_schedule),
             "terminal_growth_rate": self.terminal_growth_rate,
         }

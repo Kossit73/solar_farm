@@ -72,6 +72,7 @@ from solar_farm_financial_model.model import (
     SolarFarmFinancialModel,
     capex_item_schedule,
 )
+from solar_farm_financial_model.risk import sync_annual_risk_rows
 from solar_farm_financial_model.reporting import build_summary_report
 from solar_farm_financial_model.schemas import (
     Assumptions,
@@ -80,6 +81,7 @@ from solar_farm_financial_model.schemas import (
     FixedOpexItem,
     InventoryPayableSettings,
     ReceivableSettings,
+    RiskScheduleEntry,
     TaxRateSchedule,
     VariableOpexItem,
 )
@@ -480,16 +482,16 @@ def _run_model(
         debt_facilities.sort(key=lambda facility: (facility.start_month, facility.name.lower()))
         assumptions.debt_facilities = tuple(debt_facilities)
 
-    risk_totals = [
-        _coerce_float(row.get("inherent_risk"))
-        + _coerce_float(row.get("climate_risk"))
-        + _coerce_float(row.get("political_risk"))
+    assumptions.risk_schedule = [
+        RiskScheduleEntry(
+            name=str(row.get("name", "Baseline") or "Baseline"),
+            year=int(row.get("year", start_year)),
+            inherent_risk=max(0.0, _coerce_float(row.get("inherent_risk"))),
+            climate_risk=max(0.0, _coerce_float(row.get("climate_risk"))),
+            political_risk=max(0.0, _coerce_float(row.get("political_risk"))),
+        )
         for row in risk_list
     ]
-    risk_premium = float(np.mean(risk_totals)) if risk_totals else 0.0
-    assumptions.global_assumptions.discount_rate = min(
-        0.99, float(overrides["discount_rate"]) + risk_premium
-    )
 
     model = SolarFarmFinancialModel(assumptions)
     outputs = model.run()
@@ -2293,13 +2295,6 @@ RISK_SCHEDULE_DEFAULTS = [
         "climate_risk": 0.02,
         "political_risk": 0.03,
     },
-    {
-        "name": "Baseline",
-        "year": 2026,
-        "inherent_risk": 0.05,
-        "climate_risk": 0.02,
-        "political_risk": 0.03,
-    },
 ]
 
 
@@ -3573,7 +3568,10 @@ def _render_risk_schedule_section() -> None:
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
-    action_cols = st.columns([1.4, 1, 1, 3.6])
+    st.session_state[state_key] = sync_annual_risk_rows(st.session_state[state_key], year_options)
+    rows = st.session_state[state_key]
+    updated_rows: List[Dict[str, object]] = []
+    action_cols = st.columns([1.4, 1, 4.6])
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
     increment_percent = action_cols[0].number_input(
@@ -3597,26 +3595,14 @@ def _render_risk_schedule_section() -> None:
                 "political_risk": 1.0,
             },
         )
-    if action_cols[2].button("Add Row", key=f"{state_key}_add"):
-        template = copy.deepcopy(st.session_state[state_key][-1]) if st.session_state[state_key] else {
-            "name": "Risk 1",
-            "inherent_risk": 0.0,
-            "climate_risk": 0.0,
-            "political_risk": 0.0,
-        }
-        template["id"] = uuid.uuid4().hex
-        template["year"] = _next_projection_year_for_rows(st.session_state[state_key], year_options, start_year)
-        template["name"] = str(template.get("name", f"Risk {len(st.session_state[state_key]) + 1}"))
-        st.session_state[state_key].append(template)
-        st.session_state[_schedule_edit_state_key(state_key)] = template["id"]
+    action_cols[2].caption("One row is maintained for every year in the selected project horizon.")
 
     rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
     editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
 
     for idx, row in enumerate(rows):
         row_id = str(row.get("id"))
-        summary_cols = st.columns([4.2, 1.2, 1])
+        summary_cols = st.columns([5.2, 1.2])
         summary_cols[0].markdown(
             f"**{str(row.get('name', f'Risk {idx + 1}'))}**  |  Year {int(row.get('year', year_options[0]))}  |  "
             f"Inherent {float(row.get('inherent_risk', 0.0)):.3f}  |  "
@@ -3626,11 +3612,6 @@ def _render_risk_schedule_section() -> None:
         if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
             st.session_state[_schedule_edit_state_key(state_key)] = row_id
             editing_row_id = row_id
-        remove_clicked = summary_cols[2].button("Remove", key=f"{state_key}_remove_{row_id}")
-        if remove_clicked:
-            if editing_row_id == row_id:
-                st.session_state[_schedule_edit_state_key(state_key)] = None
-            continue
 
         updated_row = copy.deepcopy(row)
         if editing_row_id == row_id:

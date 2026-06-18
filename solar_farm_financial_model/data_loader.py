@@ -154,6 +154,7 @@ def _default_assumptions() -> Assumptions:
         receivable_settings=receivable_settings,
         inventory_settings=inventory_settings,
         tax_schedule=tax_schedule,
+        risk_schedule=[],
         terminal_growth_rate=0.02,
     )
 
@@ -212,6 +213,7 @@ def _load_from_excel(excel_path: Path) -> Optional[Assumptions]:
         receivable_settings=receivable_settings,
         inventory_settings=inventory_settings,
         tax_schedule=tax_schedule,
+        risk_schedule=[],
         terminal_growth_rate=0.02,
     )
 
