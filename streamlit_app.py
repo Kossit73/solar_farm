@@ -54,6 +54,14 @@ from solar_farm_financial_model.input_parsing import (
     rows_from_tuple as _rows_from_tuple_helper,
     tupleize as _tupleize_helper,
 )
+from solar_farm_financial_model.labour import (
+    LABOUR_BASE_FIELDS,
+    default_labour_rows,
+    labour_rows_to_fixed_opex,
+    labour_tuple_fields,
+    labour_year_columns,
+    normalize_labour_rows,
+)
 from solar_farm_financial_model.presentation import (
     inject_app_theme as _inject_app_theme_helper,
     render_model_hero as _render_model_hero_helper,
@@ -266,8 +274,13 @@ def _run_model(
     """Execute the financial model with optional overrides and return outputs."""
 
     overrides = dict(override_items)
+    start_year = int(overrides.get("start_year", 2025))
+    end_year = int(overrides.get("end_year", start_year))
+    if end_year < start_year:
+        end_year = start_year
+    labour_fields = labour_tuple_fields((end_year - start_year) + 1)
     monthly_generation_list = _rows_from_tuple(monthly_generation_rows, ("month", "expected_mwh"))
-    labour_list = _rows_from_tuple(labour_rows, ("role", "annual_cost"))
+    labour_list = _rows_from_tuple(labour_rows, labour_fields)
     initial_investment_list = _rows_from_tuple(
         initial_investment_rows,
         (
@@ -401,11 +414,7 @@ def _run_model(
         fixed_items = list(assumptions.fixed_opex)
         variable_items = list(assumptions.variable_opex)
 
-    for row in labour_list:
-        role = str(row.get("role", "")).strip()
-        cost = _coerce_float(row.get("annual_cost"))
-        if role and cost > 0:
-            fixed_items.append(FixedOpexItem(name=role, annual_cost=cost, inflation_rate=inflation_default))
+    fixed_items.extend(labour_rows_to_fixed_opex(labour_list, labour_year_columns((end_year - start_year) + 1)))
 
     assumptions.fixed_opex = tuple(fixed_items)
     assumptions.variable_opex = tuple(variable_items)
@@ -1480,6 +1489,11 @@ def _projection_year_options() -> List[int]:
     return list(range(start_year, end_year + 1)) or [start_year]
 
 
+def _labour_year_columns() -> List[str]:
+    start_year, end_year = _projection_year_bounds()
+    return labour_year_columns((end_year - start_year) + 1)
+
+
 def _projection_timeline_index() -> pd.DatetimeIndex:
     """Return a monthly timeline covering the configured projection horizon."""
 
@@ -1994,14 +2008,6 @@ MONTHLY_GENERATION_DEFAULTS = [
     {"month": "October", "expected_mwh": 508.1},
     {"month": "November", "expected_mwh": 635.1},
     {"month": "December", "expected_mwh": 635.1},
-]
-
-
-LABOUR_DEFAULTS = [
-    {"role": "Plant Manager", "annual_cost": 95_000.0},
-    {"role": "Field Technicians", "annual_cost": 180_000.0},
-    {"role": "Control Room Operator", "annual_cost": 80_000.0},
-    {"role": "Maintenance Crew", "annual_cost": 150_000.0},
 ]
 
 
@@ -2898,35 +2904,67 @@ def _render_initial_investment_section() -> None:
 
 def _render_labour_structure_section() -> None:
     state_key = "labour_structure"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(LABOUR_DEFAULTS)
-
     st.markdown("### Direct Labour Structure")
-    rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
-    for idx, row in enumerate(rows):
-        with st.container(border=True):
-            col_role, col_cost, col_remove = st.columns([3, 2, 1])
-            role = col_role.text_input(
-                "Role",
-                value=str(row.get("role", "")),
-                key=f"{state_key}_role_{idx}",
-            )
-            annual_cost = col_cost.number_input(
-                "Annual Cost",
-                value=float(row.get("annual_cost", 0.0)),
-                key=f"{state_key}_cost_{idx}",
-                step=100.0,
-                min_value=0.0,
-            )
-            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
-        if remove_clicked:
-            continue
-        updated_rows.append({"role": role, "annual_cost": annual_cost})
-    st.session_state[state_key] = updated_rows
+    st.caption(
+        "This mirrors the microbrewery labour table shape and cost elements. In solar, it currently rolls "
+        "into labour payroll and fixed OPEX rather than production-capacity logic."
+    )
 
-    if st.button("Add Labour Role", key=f"{state_key}_add"):
-        st.session_state[state_key].append({"role": "New Role", "annual_cost": 0.0})
+    year_columns = _labour_year_columns()
+    current_rows = st.session_state.get(state_key)
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(default_labour_rows(year_columns))
+    normalized_rows = normalize_labour_rows(current_rows, year_columns)
+    st.session_state[state_key] = copy.deepcopy(normalized_rows)
+
+    labour_df = pd.DataFrame(normalized_rows)
+    column_order = list(LABOUR_BASE_FIELDS) + year_columns
+    for column in column_order:
+        if column not in labour_df.columns:
+            labour_df[column] = 0.0 if column in year_columns or column not in {"role", "allocation_driver", "scope", "target_sku_id"} else ""
+    labour_df = labour_df[column_order]
+
+    numeric_columns = {
+        "monthly_cost_per_fte",
+        "annual_raise_pct",
+        "benefits_pct",
+        "payroll_tax_pct",
+        "overtime_pct",
+        "capacity_liters_per_fte_month",
+        *year_columns,
+    }
+    for column in numeric_columns:
+        labour_df[column] = pd.to_numeric(labour_df[column], errors="coerce").fillna(0.0)
+
+    edited_df = st.data_editor(
+        labour_df,
+        key=f"{state_key}_editor",
+        hide_index=True,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "role": st.column_config.TextColumn("Role"),
+            "allocation_driver": st.column_config.TextColumn("Allocation Driver"),
+            "scope": st.column_config.TextColumn("Scope"),
+            "target_sku_id": st.column_config.TextColumn("Target SKU ID"),
+            "monthly_cost_per_fte": st.column_config.NumberColumn("Monthly Cost / FTE", min_value=0.0, step=100.0, format="%.2f"),
+            "annual_raise_pct": st.column_config.NumberColumn("Annual Raise %", step=0.01, format="%.4f"),
+            "benefits_pct": st.column_config.NumberColumn("Benefits %", step=0.01, format="%.4f"),
+            "payroll_tax_pct": st.column_config.NumberColumn("Payroll Tax %", step=0.01, format="%.4f"),
+            "overtime_pct": st.column_config.NumberColumn("Overtime %", step=0.01, format="%.4f"),
+            "capacity_liters_per_fte_month": st.column_config.NumberColumn(
+                "Capacity / FTE / Month",
+                min_value=0.0,
+                step=100.0,
+                format="%.2f",
+            ),
+            **{
+                column: st.column_config.NumberColumn(column, min_value=0.0, step=0.25, format="%.2f")
+                for column in year_columns
+            },
+        },
+    )
+    st.session_state[state_key] = normalize_labour_rows(edited_df.to_dict("records"), year_columns)
 
 
 def _render_operating_expense_section() -> None:
@@ -3801,12 +3839,19 @@ def _render_assumption_controls() -> tuple[
         "end_year": int(end_year),
     }
 
+    labour_years = _labour_year_columns()
     labour_rows = [
         {
-            "role": str(row.get("role", "")).strip(),
-            "annual_cost": float(row.get("annual_cost", 0.0)),
+            **{
+                field: (
+                    str(row.get(field, "")).strip()
+                    if field in {"role", "allocation_driver", "scope", "target_sku_id"}
+                    else float(row.get(field, 0.0))
+                )
+                for field in (*LABOUR_BASE_FIELDS, *tuple(labour_years))
+            }
         }
-        for row in st.session_state.get("labour_structure", [])
+        for row in normalize_labour_rows(st.session_state.get("labour_structure", []), labour_years)
         if str(row.get("role", "")).strip()
     ]
 
@@ -5500,7 +5545,7 @@ with tabs[0]:
     ) = _render_assumption_controls()
 
 monthly_generation_tuple = _tupleize(monthly_generation_rows, ("month", "expected_mwh"))
-labour_tuple = _tupleize(labour_rows, ("role", "annual_cost"))
+labour_tuple = _tupleize(labour_rows, labour_tuple_fields((end_year - start_year) + 1))
 initial_investment_tuple = _tupleize(
     initial_investment_rows,
     (
