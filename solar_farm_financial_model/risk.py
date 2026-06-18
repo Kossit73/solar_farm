@@ -38,11 +38,19 @@ def sync_annual_risk_rows(
 
     normalized: List[Dict[str, object]] = []
     prior_row = baseline
+    used_ids: set[str] = set()
     for year in sorted_years:
         explicit_row = existing_by_year.get(int(year))
         source = explicit_row if explicit_row is not None else prior_row
         row = copy.deepcopy(source)
-        row["id"] = str(row.get("id") or uuid.uuid4().hex)
+        if explicit_row is not None:
+            candidate_id = str(row.get("id") or uuid.uuid4().hex)
+            if candidate_id in used_ids:
+                candidate_id = uuid.uuid4().hex
+        else:
+            candidate_id = uuid.uuid4().hex
+        row["id"] = candidate_id
+        used_ids.add(candidate_id)
         row["year"] = int(year)
         row["name"] = str(row.get("name", baseline.get("name", "Baseline")) or "Baseline")
         for field in _RISK_FIELDS:

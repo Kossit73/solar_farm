@@ -2405,8 +2405,13 @@ def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None
 
 def _ensure_schedule_row_ids(state_key: str) -> None:
     rows = st.session_state.get(state_key, [])
+    seen_ids: set[str] = set()
     for row in rows:
-        row.setdefault("id", uuid.uuid4().hex)
+        row_id = str(row.get("id") or "")
+        if not row_id or row_id in seen_ids:
+            row_id = uuid.uuid4().hex
+            row["id"] = row_id
+        seen_ids.add(row_id)
 
 
 def _schedule_edit_state_key(state_key: str) -> str:
