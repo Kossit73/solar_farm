@@ -3614,7 +3614,7 @@ def _render_risk_schedule_section() -> None:
     st.session_state[state_key] = sync_annual_risk_rows(st.session_state[state_key], year_options)
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    action_cols = st.columns([1.4, 1, 4.6])
+    action_cols = st.columns([1.3, 1.1, 3.8])
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
     increment_percent = action_cols[0].number_input(
@@ -3638,29 +3638,48 @@ def _render_risk_schedule_section() -> None:
                 "political_risk": 1.0,
             },
         )
-    action_cols[2].caption("One row is maintained for every year in the selected project horizon.")
+    rows = st.session_state[state_key]
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+
+    option_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('name', 'Risk')).strip() or 'Risk'} | "
+            f"Year {int(row.get('year', year_options[0]))} | "
+            f"I {float(row.get('inherent_risk', 0.0)):.3f} | "
+            f"C {float(row.get('climate_risk', 0.0)):.3f} | "
+            f"P {float(row.get('political_risk', 0.0)):.3f}"
+        )
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[2].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        editing_row_id = None
+
+    st.caption("One row is maintained for every year in the selected project horizon.")
 
     rows = st.session_state[state_key]
-    editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
-
     for idx, row in enumerate(rows):
         row_id = str(row.get("id"))
-        summary_cols = st.columns([5.2, 1.2])
-        summary_cols[0].markdown(
-            f"**{str(row.get('name', f'Risk {idx + 1}'))}**  |  Year {int(row.get('year', year_options[0]))}  |  "
-            f"Inherent {float(row.get('inherent_risk', 0.0)):.3f}  |  "
-            f"Climate {float(row.get('climate_risk', 0.0)):.3f}  |  "
-            f"Political {float(row.get('political_risk', 0.0)):.3f}"
-        )
-        if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
-            st.session_state[_schedule_edit_state_key(state_key)] = row_id
-            editing_row_id = row_id
-
         updated_row = copy.deepcopy(row)
         if editing_row_id == row_id:
             with st.container(border=True):
+                st.markdown(
+                    f"**Editing:** {str(row.get('name', f'Risk {idx + 1}'))} | "
+                    f"Year {int(row.get('year', year_options[0]))}"
+                )
                 col_label, col_year, col_inherent, col_climate, col_political, col_done = st.columns(
-                    [1.4, 1, 1, 1, 1, 0.6]
+                    [1.5, 1, 1, 1, 1, 0.8]
                 )
                 updated_row["name"] = col_label.text_input(
                     "Risk label",
@@ -3707,8 +3726,7 @@ def _render_risk_schedule_section() -> None:
                 )
 
                 if col_done.button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = None
-                    editing_row_id = None
+                    st.session_state[_schedule_edit_state_key(state_key)] = row_id
 
         updated_rows.append(updated_row)
 
@@ -3716,7 +3734,7 @@ def _render_risk_schedule_section() -> None:
 
     if st.session_state[state_key]:
         risk_df = pd.DataFrame(st.session_state[state_key]).drop(columns=["id"], errors="ignore")
-        st.dataframe(risk_df, use_container_width=True)
+        st.dataframe(risk_df, use_container_width=True, height=min(420, 120 + (len(risk_df) * 35)))
 
 
 def _get_row_value(state_key: str, field_id: str, default: float | bool, expected_type: type) -> float | bool:
