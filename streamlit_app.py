@@ -5432,150 +5432,619 @@ def _sample_monte_carlo_multiplier(rng: np.random.Generator, row: Dict[str, obje
     return float(rng.triangular(low, mode, high))
 
 
-def _render_break_even_configuration() -> List[Dict[str, object]]:
-    """Render editable break-even input rows and return the stored configuration."""
+def _threshold_driver_value(assumptions: Assumptions, driver_key: str) -> float:
+    if driver_key == "ppa_rate":
+        return float(assumptions.revenue.ppa.rate_curve.initial)
+    if driver_key == "merchant_rate":
+        return float(assumptions.revenue.merchant.rate_curve.initial)
+    if driver_key == "rec_rate":
+        return float(assumptions.revenue.rec.initial)
+    if driver_key == "capacity_factor":
+        return float(assumptions.energy.capacity_factor)
+    if driver_key == "capex_total":
+        return float(sum(item.amount for item in assumptions.capex_items))
+    if driver_key == "fixed_opex":
+        return float(sum(item.annual_cost for item in assumptions.fixed_opex))
+    if driver_key == "variable_opex":
+        return float(sum(item.cost_per_mwh for item in assumptions.variable_opex))
+    if driver_key == "debt_size":
+        return float(sum(facility.principal for facility in assumptions.debt_facilities))
+    return float("nan")
 
-    if BREAK_EVEN_STATE_KEY not in st.session_state:
-        st.session_state[BREAK_EVEN_STATE_KEY] = copy.deepcopy(BREAK_EVEN_DEFAULTS)
 
-    rows: List[Dict[str, object]] = st.session_state[BREAK_EVEN_STATE_KEY]
-    updated_rows: List[Dict[str, object]] = []
+def _format_driver_value(driver_key: str, value: float) -> str:
+    if pd.isna(value):
+        return "N/A"
+    if driver_key == "capacity_factor":
+        return _format_percentage(value)
+    return _format_currency(value)
 
-    st.subheader("Break-even Analysis Inputs")
-    st.caption("Capture fixed costs, contribution margins, and target profit by product or revenue stream.")
 
-    for idx, row in enumerate(rows):
-        with st.container(border=True):
-            cols = st.columns([2.0, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8])
-            product = cols[0].text_input(
-                "Product",
-                value=str(row.get("product", "")),
-                key=f"{BREAK_EVEN_STATE_KEY}_product_{idx}",
-            )
-            fixed_cost = cols[1].number_input(
-                "Fixed Cost",
-                value=float(row.get("fixed_cost", 0.0)),
-                min_value=0.0,
-                step=1_000.0,
-                key=f"{BREAK_EVEN_STATE_KEY}_fixed_{idx}",
-            )
-            variable_cost = cols[2].number_input(
-                "Variable Cost",
-                value=float(row.get("variable_cost", 0.0)),
-                min_value=0.0,
-                step=0.01,
-                key=f"{BREAK_EVEN_STATE_KEY}_variable_{idx}",
-            )
-            selling_price = cols[3].number_input(
-                "Selling Price",
-                value=float(row.get("selling_price", 0.0)),
-                min_value=0.0,
-                step=0.01,
-                key=f"{BREAK_EVEN_STATE_KEY}_price_{idx}",
-            )
-            target_profit = cols[4].number_input(
-                "Target Profit",
-                value=float(row.get("target_profit", 0.0)),
-                min_value=0.0,
-                step=1_000.0,
-                key=f"{BREAK_EVEN_STATE_KEY}_profit_{idx}",
-            )
-            expected_volume = cols[5].number_input(
-                "Expected Volume",
-                value=float(row.get("expected_volume", 0.0)),
-                min_value=0.0,
-                step=1_000.0,
-                key=f"{BREAK_EVEN_STATE_KEY}_volume_{idx}",
-            )
-            remove_clicked = cols[6].button("Remove", key=f"{BREAK_EVEN_STATE_KEY}_remove_{idx}")
+def _threshold_metric_value(outputs: ModelOutputs, metric_key: str) -> float:
+    return float(outputs.metrics.get(metric_key, float("nan")))
 
-        if remove_clicked:
-            continue
 
-        updated_rows.append(
+def _format_threshold_metric(metric_key: str, value: float) -> str:
+    if pd.isna(value):
+        return "N/A"
+    if metric_key in {"project_irr", "equity_irr"}:
+        return _format_percentage(value)
+    if metric_key == "min_dscr":
+        return f"{value:.2f}x"
+    return _format_currency(value)
+
+
+def _apply_driver_multiplier(assumptions: Assumptions, driver_key: str, multiplier: float) -> None:
+    if driver_key == "debt_size":
+        for facility in assumptions.debt_facilities:
+            facility.principal = max(0.0, facility.principal * multiplier)
+        return
+
+    if driver_key not in SENSITIVITY_OPTIONS:
+        return
+
+    _, apply_fn = SENSITIVITY_OPTIONS[driver_key]
+    apply_fn(assumptions, multiplier)
+
+
+def _resolve_driver_value(base_assumptions: Assumptions, driver_key: str, multiplier: float) -> float:
+    scenario = copy.deepcopy(base_assumptions)
+    _apply_driver_multiplier(scenario, driver_key, multiplier)
+    return _threshold_driver_value(scenario, driver_key)
+
+
+def _run_threshold_search(
+    base_assumptions: Assumptions,
+    driver_key: str,
+    metric_key: str,
+    target_value: float,
+    min_multiplier: float,
+    max_multiplier: float,
+    steps: int = 41,
+) -> Tuple[pd.DataFrame, Dict[str, object] | None]:
+    records: List[Dict[str, object]] = []
+    best_record: Dict[str, object] | None = None
+    best_diff = float("inf")
+
+    for multiplier in np.linspace(min_multiplier, max_multiplier, max(3, steps)):
+        scenario_outputs = _simulate_outputs(
+            base_assumptions,
+            lambda assumptions, m=float(multiplier), key=driver_key: _apply_driver_multiplier(assumptions, key, m),
+        )
+        metric_value = _threshold_metric_value(scenario_outputs, metric_key)
+        diff = abs(metric_value - target_value) if pd.notna(metric_value) else float("inf")
+        record = {
+            "Multiplier": float(multiplier),
+            "Driver Value": _resolve_driver_value(base_assumptions, driver_key, float(multiplier)),
+            "Metric Value": metric_value,
+            "Project NPV": scenario_outputs.metrics.get("project_npv", float("nan")),
+            "Project IRR": scenario_outputs.metrics.get("project_irr", float("nan")),
+            "Equity IRR": scenario_outputs.metrics.get("equity_irr", float("nan")),
+            "Minimum DSCR": scenario_outputs.metrics.get("min_dscr", float("nan")),
+            "LCOE": scenario_outputs.metrics.get("lcoe_proxy_per_mwh", float("nan")),
+        }
+        records.append(record)
+        if diff < best_diff:
+            best_diff = diff
+            best_record = record
+
+    return pd.DataFrame(records), best_record
+
+
+def _weighted_average_debt_rate(assumptions: Assumptions) -> float:
+    total_principal = float(sum(max(0.0, facility.principal) for facility in assumptions.debt_facilities))
+    if total_principal <= 0:
+        return 0.0
+    weighted = sum(max(0.0, facility.principal) * float(facility.interest_rate) for facility in assumptions.debt_facilities)
+    return weighted / total_principal
+
+
+def _build_indicative_dscr_sculpting_schedule(
+    annual_summary: pd.DataFrame,
+    opening_debt: float,
+    annual_rate: float,
+    target_dscr: float,
+) -> pd.DataFrame:
+    remaining_balance = max(0.0, opening_debt)
+    records: List[Dict[str, float]] = []
+    covenant = max(1.01, target_dscr)
+
+    for year, row in annual_summary.iterrows():
+        cfads = max(0.0, float(row.get("cfads", 0.0)))
+        allowed_service = cfads / covenant if covenant > 0 else 0.0
+        interest = remaining_balance * annual_rate
+        principal = min(max(0.0, allowed_service - interest), remaining_balance)
+        debt_service = interest + principal
+        closing_balance = max(0.0, remaining_balance - principal)
+        sculpted_dscr = cfads / debt_service if debt_service > 0 else float("nan")
+
+        records.append(
             {
-                "id": row.get("id") or uuid.uuid4().hex,
-                "product": product,
-                "fixed_cost": fixed_cost,
-                "variable_cost": variable_cost,
-                "selling_price": selling_price,
-                "target_profit": target_profit,
-                "expected_volume": expected_volume,
+                "Year": float(year),
+                "Opening Debt": remaining_balance,
+                "CFADS": cfads,
+                "Allowed Debt Service": allowed_service,
+                "Indicative Interest": interest,
+                "Indicative Principal": principal,
+                "Indicative Debt Service": debt_service,
+                "Indicative DSCR": sculpted_dscr,
+                "Closing Debt": closing_balance,
+            }
+        )
+        remaining_balance = closing_balance
+
+    return pd.DataFrame(records)
+
+
+def _render_solar_threshold_analysis(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
+    st.header("Solar Threshold Analysis")
+    st.caption("Solve for the project driver that gets closest to a financing or return threshold.")
+
+    metric_options = {
+        "project_npv": "Project NPV",
+        "project_irr": "Project IRR",
+        "equity_irr": "Equity IRR",
+        "min_dscr": "Minimum DSCR",
+        "lcoe_proxy_per_mwh": "LCOE",
+    }
+    driver_options = {
+        "ppa_rate": "PPA Rate",
+        "merchant_rate": "Merchant Rate",
+        "rec_rate": "REC Price",
+        "capacity_factor": "Capacity Factor",
+        "capex_total": "Total CAPEX",
+        "fixed_opex": "Fixed Opex",
+        "variable_opex": "Variable Opex",
+        "debt_size": "Debt Size",
+    }
+
+    control_cols = st.columns([2, 2, 1.2, 1.2, 1.2])
+    metric_key = control_cols[0].selectbox(
+        "Threshold Metric",
+        options=list(metric_options.keys()),
+        index=0,
+        key="solar_threshold_metric",
+        format_func=lambda key: metric_options[key],
+    )
+    driver_key = control_cols[1].selectbox(
+        "Solve Driver",
+        options=list(driver_options.keys()),
+        index=0,
+        key="solar_threshold_driver",
+        format_func=lambda key: driver_options[key],
+    )
+
+    default_target = {
+        "project_npv": 0.0,
+        "project_irr": 0.10,
+        "equity_irr": 0.12,
+        "min_dscr": max(1.20, float(getattr(base_assumptions, "min_dscr_covenant", 1.20))),
+        "lcoe_proxy_per_mwh": float(outputs.metrics.get("lcoe_proxy_per_mwh", 0.0)),
+    }.get(metric_key, 0.0)
+    target_value = control_cols[2].number_input(
+        "Target",
+        value=float(default_target),
+        step=0.01,
+        format="%.4f",
+        key="solar_threshold_target",
+    )
+    min_multiplier = control_cols[3].number_input(
+        "Min Multiplier",
+        min_value=0.1,
+        value=0.60,
+        step=0.05,
+        format="%.2f",
+        key="solar_threshold_min_mult",
+    )
+    max_multiplier = control_cols[4].number_input(
+        "Max Multiplier",
+        min_value=min_multiplier + 0.05,
+        value=max(1.60, min_multiplier + 0.05),
+        step=0.05,
+        format="%.2f",
+        key="solar_threshold_max_mult",
+    )
+
+    result_df, best_record = _run_threshold_search(
+        base_assumptions,
+        driver_key,
+        metric_key,
+        float(target_value),
+        float(min_multiplier),
+        float(max_multiplier),
+    )
+
+    base_driver_value = _threshold_driver_value(base_assumptions, driver_key)
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Base Driver", _format_driver_value(driver_key, base_driver_value))
+    summary_cols[1].metric(metric_options[metric_key], _format_threshold_metric(metric_key, outputs.metrics.get(metric_key, float("nan"))))
+
+    if best_record is None:
+        summary_cols[2].metric("Required Driver", "N/A")
+        summary_cols[3].metric("Projected Metric", "N/A")
+        st.warning("No valid threshold result was produced.")
+        return
+
+    summary_cols[2].metric("Required Driver", _format_driver_value(driver_key, float(best_record["Driver Value"])))
+    summary_cols[3].metric("Projected Metric", _format_threshold_metric(metric_key, float(best_record["Metric Value"])))
+
+    st.dataframe(
+        result_df.style.format(
+            {
+                "Multiplier": "{:.2f}",
+                "Driver Value": lambda value: _format_driver_value(driver_key, float(value)),
+                "Metric Value": lambda value: _format_threshold_metric(metric_key, float(value)),
+                "Project NPV": "{:,.0f}".format,
+                "Project IRR": "{:.2%}".format,
+                "Equity IRR": "{:.2%}".format,
+                "Minimum DSCR": "{:.2f}".format,
+                "LCOE": "{:,.2f}".format,
+            }
+        ),
+        use_container_width=True,
+    )
+
+
+def _render_debt_sizing_and_sculpting(base_assumptions: Assumptions) -> None:
+    st.header("Debt Sizing / DSCR Sculpting")
+    st.caption("Size debt against a DSCR covenant and show an indicative sculpted debt-service profile.")
+
+    col_target, col_min, col_max = st.columns(3)
+    target_dscr = col_target.number_input(
+        "Target Minimum DSCR",
+        min_value=1.00,
+        value=max(1.20, float(getattr(base_assumptions, "min_dscr_covenant", 1.20))),
+        step=0.05,
+        format="%.2f",
+        key="debt_sizing_target_dscr",
+    )
+    min_multiplier = col_min.number_input(
+        "Debt Multiplier Floor",
+        min_value=0.10,
+        value=0.50,
+        step=0.05,
+        format="%.2f",
+        key="debt_sizing_min_mult",
+    )
+    max_multiplier = col_max.number_input(
+        "Debt Multiplier Cap",
+        min_value=min_multiplier + 0.05,
+        value=max(1.50, min_multiplier + 0.05),
+        step=0.05,
+        format="%.2f",
+        key="debt_sizing_max_mult",
+    )
+
+    base_debt = float(sum(facility.principal for facility in base_assumptions.debt_facilities))
+    base_capex = float(sum(item.amount for item in base_assumptions.capex_items))
+    best_case: Dict[str, object] | None = None
+    tested_cases: List[Dict[str, object]] = []
+
+    for multiplier in np.linspace(min_multiplier, max_multiplier, 41):
+        scenario_outputs = _simulate_outputs(
+            base_assumptions,
+            lambda assumptions, m=float(multiplier): _apply_driver_multiplier(assumptions, "debt_size", m),
+        )
+        min_dscr = float(scenario_outputs.metrics.get("min_dscr", float("nan")))
+        covenant_breaches = float(scenario_outputs.metrics.get("covenant_breach_months", float("nan")))
+        total_debt = base_debt * float(multiplier)
+        leverage_ratio = _safe_ratio(total_debt, base_capex)
+        tested_case = {
+            "Debt Multiplier": float(multiplier),
+            "Total Debt": total_debt,
+            "Debt / CAPEX": leverage_ratio,
+            "Minimum DSCR": min_dscr,
+            "Average DSCR": float(scenario_outputs.metrics.get("avg_dscr", float("nan"))),
+            "LLCR": float(scenario_outputs.metrics.get("llcr_proxy", float("nan"))),
+            "Project NPV": float(scenario_outputs.metrics.get("project_npv", float("nan"))),
+            "Equity IRR": float(scenario_outputs.metrics.get("equity_irr", float("nan"))),
+            "Covenant Breach Months": covenant_breaches,
+            "outputs": scenario_outputs,
+        }
+        tested_cases.append(tested_case)
+        if min_dscr >= target_dscr:
+            if best_case is None or float(multiplier) > float(best_case["Debt Multiplier"]):
+                best_case = tested_case
+
+    if best_case is None and tested_cases:
+        best_case = min(tested_cases, key=lambda case: abs(float(case["Minimum DSCR"]) - float(target_dscr)))
+
+    if best_case is None:
+        st.warning("No debt-sizing case could be evaluated.")
+        return
+
+    best_outputs = best_case["outputs"]
+    annual_rate = _weighted_average_debt_rate(base_assumptions)
+    sculpting_df = _build_indicative_dscr_sculpting_schedule(
+        best_outputs.annual_summary,
+        float(best_case["Total Debt"]),
+        annual_rate,
+        float(target_dscr),
+    )
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Base Debt", _format_currency(base_debt))
+    metric_cols[1].metric("Indicative Sized Debt", _format_currency(float(best_case["Total Debt"])))
+    metric_cols[2].metric("Debt / CAPEX", f"{float(best_case['Debt / CAPEX']):.1%}" if pd.notna(best_case["Debt / CAPEX"]) else "N/A")
+    metric_cols[3].metric("Minimum DSCR", f"{float(best_case['Minimum DSCR']):.2f}x" if pd.notna(best_case["Minimum DSCR"]) else "N/A")
+
+    debt_results_df = pd.DataFrame(tested_cases).drop(columns=["outputs"], errors="ignore")
+    st.markdown("#### Debt Sizing Sweep")
+    st.dataframe(
+        debt_results_df.style.format(
+            {
+                "Debt Multiplier": "{:.2f}".format,
+                "Total Debt": "{:,.0f}".format,
+                "Debt / CAPEX": "{:.1%}".format,
+                "Minimum DSCR": "{:.2f}".format,
+                "Average DSCR": "{:.2f}".format,
+                "LLCR": "{:.2f}".format,
+                "Project NPV": "{:,.0f}".format,
+                "Equity IRR": "{:.2%}".format,
+                "Covenant Breach Months": "{:,.0f}".format,
+            }
+        ),
+        use_container_width=True,
+    )
+
+    st.markdown("#### Indicative Sculpted Debt Service")
+    st.caption("This sculpting table is sized off annual CFADS and the selected DSCR covenant. It is indicative, not a replacement for the contractual amortisation schedule.")
+    st.dataframe(
+        sculpting_df.style.format(
+            {
+                "Year": "{:.0f}".format,
+                "Opening Debt": "{:,.0f}".format,
+                "CFADS": "{:,.0f}".format,
+                "Allowed Debt Service": "{:,.0f}".format,
+                "Indicative Interest": "{:,.0f}".format,
+                "Indicative Principal": "{:,.0f}".format,
+                "Indicative Debt Service": "{:,.0f}".format,
+                "Indicative DSCR": "{:.2f}".format,
+                "Closing Debt": "{:,.0f}".format,
+            }
+        ),
+        use_container_width=True,
+    )
+
+    if not sculpting_df.empty:
+        chart_df = sculpting_df.set_index("Year")[["CFADS", "Indicative Debt Service"]]
+        st.line_chart(chart_df, use_container_width=True)
+
+
+def _render_probability_and_covenant_stress(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
+    st.header("P50 / P75 / P90 and Covenant Stress Testing")
+    st.caption("Translate generation downside and financing stresses into DSCR, covenant, and return impacts.")
+
+    sigma_default = max(0.0, float(getattr(base_assumptions, "generation_uncertainty", 0.10)))
+    covenant_default = max(1.20, float(getattr(base_assumptions, "min_dscr_covenant", 1.20)))
+
+    col_sigma, col_merchant, col_opex, col_rate, col_covenant = st.columns(5)
+    sigma = col_sigma.number_input(
+        "Generation Sigma",
+        min_value=0.00,
+        max_value=0.50,
+        value=sigma_default,
+        step=0.01,
+        format="%.2f",
+        key="stress_generation_sigma",
+    )
+    merchant_downside = col_merchant.number_input(
+        "Merchant Downside %",
+        min_value=0.0,
+        max_value=100.0,
+        value=10.0,
+        step=1.0,
+        key="stress_merchant_downside_pct",
+    ) / 100.0
+    opex_upside = col_opex.number_input(
+        "Opex Upside %",
+        min_value=0.0,
+        max_value=100.0,
+        value=10.0,
+        step=1.0,
+        key="stress_opex_upside_pct",
+    ) / 100.0
+    rate_shock_bps = col_rate.number_input(
+        "Rate Shock (bps)",
+        min_value=0.0,
+        max_value=1000.0,
+        value=100.0,
+        step=25.0,
+        key="stress_rate_shock_bps",
+    )
+    covenant_threshold = col_covenant.number_input(
+        "Covenant DSCR",
+        min_value=1.00,
+        value=covenant_default,
+        step=0.05,
+        format="%.2f",
+        key="stress_covenant_threshold",
+    )
+
+    probability_multipliers = {
+        "Base Case": 1.0,
+        "P50": 1.0,
+        "P75": max(0.01, 1.0 - (0.674 * sigma)),
+        "P90": max(0.01, 1.0 - (1.282 * sigma)),
+    }
+
+    case_definitions = [
+        ("Base Case", lambda assumptions: None),
+        ("P50", lambda assumptions: _apply_sensitivity_capacity_factor(assumptions, probability_multipliers["P50"])),
+        ("P75", lambda assumptions: _apply_sensitivity_capacity_factor(assumptions, probability_multipliers["P75"])),
+        ("P90", lambda assumptions: _apply_sensitivity_capacity_factor(assumptions, probability_multipliers["P90"])),
+        (
+            "P90 + Merchant Downside",
+            lambda assumptions: (
+                _apply_sensitivity_capacity_factor(assumptions, probability_multipliers["P90"]),
+                _apply_sensitivity_merchant_rate(assumptions, 1.0 - merchant_downside),
+            ),
+        ),
+        (
+            "P90 + Opex Upside",
+            lambda assumptions: (
+                _apply_sensitivity_capacity_factor(assumptions, probability_multipliers["P90"]),
+                _apply_sensitivity_fixed_opex(assumptions, 1.0 + opex_upside),
+                _apply_sensitivity_variable_opex(assumptions, 1.0 + opex_upside),
+            ),
+        ),
+        (
+            "P90 + Covenant Case",
+            lambda assumptions: (
+                _apply_sensitivity_capacity_factor(assumptions, probability_multipliers["P90"]),
+                _apply_sensitivity_merchant_rate(assumptions, 1.0 - merchant_downside),
+                _apply_sensitivity_fixed_opex(assumptions, 1.0 + opex_upside),
+                _apply_sensitivity_variable_opex(assumptions, 1.0 + opex_upside),
+                [
+                    setattr(facility, "interest_rate", max(0.0, float(facility.interest_rate) + (rate_shock_bps / 10_000.0)))
+                    for facility in assumptions.debt_facilities
+                ],
+            ),
+        ),
+    ]
+
+    records: List[Dict[str, object]] = []
+    for case_name, modifier in case_definitions:
+        case_outputs = outputs if case_name == "Base Case" else _simulate_outputs(base_assumptions, modifier)
+        case_metrics = case_outputs.metrics
+        min_dscr = float(case_metrics.get("min_dscr", float("nan")))
+        covenant_headroom = min_dscr - covenant_threshold if pd.notna(min_dscr) else float("nan")
+        records.append(
+            {
+                "Case": case_name,
+                "Annual Energy (MWh)": float(case_outputs.annual_summary["energy_mwh"].mean()) if "energy_mwh" in case_outputs.annual_summary else float("nan"),
+                "Project NPV": float(case_metrics.get("project_npv", float("nan"))),
+                "Equity IRR": float(case_metrics.get("equity_irr", float("nan"))),
+                "Minimum DSCR": min_dscr,
+                "Average DSCR": float(case_metrics.get("avg_dscr", float("nan"))),
+                "LLCR": float(case_metrics.get("llcr_proxy", float("nan"))),
+                "Covenant Headroom": covenant_headroom,
+                "Breach Months": float(case_metrics.get("covenant_breach_months", float("nan"))),
             }
         )
 
-    st.session_state[BREAK_EVEN_STATE_KEY] = updated_rows
-
-    with st.container(border=True):
-        st.markdown("#### Add Break-even Input")
-        add_cols = st.columns([2.0, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8])
-        new_product = add_cols[0].text_input(
-            "Product Name",
-            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_product", ""),
-            key=f"{BREAK_EVEN_STATE_KEY}_new_product",
-        )
-        new_fixed = add_cols[1].number_input(
-            "Fixed Cost",
-            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_fixed", 0.0),
-            min_value=0.0,
-            step=1_000.0,
-            key=f"{BREAK_EVEN_STATE_KEY}_new_fixed",
-        )
-        new_variable = add_cols[2].number_input(
-            "Variable Cost",
-            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_variable", 0.0),
-            min_value=0.0,
-            step=0.01,
-            key=f"{BREAK_EVEN_STATE_KEY}_new_variable",
-        )
-        new_price = add_cols[3].number_input(
-            "Selling Price",
-            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_price", 0.0),
-            min_value=0.0,
-            step=0.01,
-            key=f"{BREAK_EVEN_STATE_KEY}_new_price",
-        )
-        new_target = add_cols[4].number_input(
-            "Target Profit",
-            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_target", 0.0),
-            min_value=0.0,
-            step=1_000.0,
-            key=f"{BREAK_EVEN_STATE_KEY}_new_target",
-        )
-        new_volume = add_cols[5].number_input(
-            "Expected Volume",
-            value=st.session_state.get(f"{BREAK_EVEN_STATE_KEY}_new_volume", 0.0),
-            min_value=0.0,
-            step=1_000.0,
-            key=f"{BREAK_EVEN_STATE_KEY}_new_volume",
-        )
-
-        add_clicked = add_cols[6].button("Add", key=f"{BREAK_EVEN_STATE_KEY}_add")
-
-    if add_clicked and new_product:
-        st.session_state[BREAK_EVEN_STATE_KEY].append(
+    stress_df = pd.DataFrame(records)
+    st.dataframe(
+        stress_df.style.format(
             {
-                "id": uuid.uuid4().hex,
-                "product": new_product,
-                "fixed_cost": float(new_fixed),
-                "variable_cost": float(new_variable),
-                "selling_price": float(new_price),
-                "target_profit": float(new_target),
-                "expected_volume": float(new_volume),
+                "Annual Energy (MWh)": "{:,.0f}".format,
+                "Project NPV": "{:,.0f}".format,
+                "Equity IRR": "{:.2%}".format,
+                "Minimum DSCR": "{:.2f}".format,
+                "Average DSCR": "{:.2f}".format,
+                "LLCR": "{:.2f}".format,
+                "Covenant Headroom": "{:.2f}".format,
+                "Breach Months": "{:,.0f}".format,
+            }
+        ),
+        use_container_width=True,
+    )
+
+    if not stress_df.empty:
+        chart_df = stress_df.set_index("Case")[["Minimum DSCR", "Covenant Headroom"]]
+        st.bar_chart(chart_df, use_container_width=True)
+
+
+def _render_lcoe_and_cod_delay(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
+    st.header("LCOE and COD Delay Analysis")
+    st.caption("Decompose project cost per MWh and measure the downside from delayed commercial operation.")
+
+    monthly = outputs.monthly_results
+    total_energy = float(monthly["energy_mwh"].sum())
+    total_capex = float(monthly["capex"].sum())
+    total_opex = float(monthly["total_opex"].sum())
+    realised_price = _safe_ratio(float(monthly["revenue_total"].sum()), total_energy)
+    capex_lcoe = _safe_ratio(total_capex, total_energy)
+    opex_lcoe = _safe_ratio(total_opex, total_energy)
+    total_lcoe = _safe_ratio(total_capex + total_opex, total_energy)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Realised Price / MWh", _format_currency(realised_price))
+    metric_cols[1].metric("CAPEX LCOE", _format_currency(capex_lcoe))
+    metric_cols[2].metric("OPEX LCOE", _format_currency(opex_lcoe))
+    metric_cols[3].metric("Total LCOE", _format_currency(total_lcoe))
+
+    delay_cols = st.columns(2)
+    max_delay_months = int(
+        delay_cols[0].number_input(
+            "Maximum COD Delay (months)",
+            min_value=0,
+            max_value=24,
+            value=12,
+            step=1,
+            key="cod_delay_max_months",
+        )
+    )
+    step_months = int(
+        delay_cols[1].number_input(
+            "Delay Step (months)",
+            min_value=1,
+            max_value=max(1, max_delay_months if max_delay_months > 0 else 1),
+            value=3,
+            step=1,
+            key="cod_delay_step_months",
+        )
+    )
+
+    delay_points = list(range(0, max_delay_months + 1, step_months))
+    if delay_points[-1] != max_delay_months:
+        delay_points.append(max_delay_months)
+
+    records: List[Dict[str, object]] = []
+    base_cod_month = max(1, int(getattr(base_assumptions, "cod_month", 1)))
+
+    for delay_months in delay_points:
+        delayed_outputs = outputs if delay_months == 0 else _simulate_outputs(
+            base_assumptions,
+            lambda assumptions, delay=delay_months, start_month=base_cod_month: setattr(
+                assumptions,
+                "cod_month",
+                start_month + int(delay),
+            ),
+        )
+        delayed_metrics = delayed_outputs.metrics
+        records.append(
+            {
+                "COD Delay (months)": float(delay_months),
+                "COD Month": float(base_cod_month + delay_months),
+                "Project NPV": float(delayed_metrics.get("project_npv", float("nan"))),
+                "Equity IRR": float(delayed_metrics.get("equity_irr", float("nan"))),
+                "Minimum DSCR": float(delayed_metrics.get("min_dscr", float("nan"))),
+                "LCOE": float(delayed_metrics.get("lcoe_proxy_per_mwh", float("nan"))),
+                "Payback (months)": float(delayed_metrics.get("project_payback_months", float("nan"))),
             }
         )
-        for suffix, reset_value in (
-            ("new_product", ""),
-            ("new_fixed", 0.0),
-            ("new_variable", 0.0),
-            ("new_price", 0.0),
-            ("new_target", 0.0),
-            ("new_volume", 0.0),
-        ):
-            st.session_state[f"{BREAK_EVEN_STATE_KEY}_{suffix}"] = reset_value
-        st.experimental_rerun()
 
-    return copy.deepcopy(st.session_state[BREAK_EVEN_STATE_KEY])
+    cod_delay_df = pd.DataFrame(records)
+    st.markdown("#### COD Delay Cases")
+    st.dataframe(
+        cod_delay_df.style.format(
+            {
+                "COD Delay (months)": "{:.0f}".format,
+                "COD Month": "{:.0f}".format,
+                "Project NPV": "{:,.0f}".format,
+                "Equity IRR": "{:.2%}".format,
+                "Minimum DSCR": "{:.2f}".format,
+                "LCOE": "{:,.2f}".format,
+                "Payback (months)": "{:.0f}".format,
+            }
+        ),
+        use_container_width=True,
+    )
+
+    if not cod_delay_df.empty:
+        chart_df = cod_delay_df.set_index("COD Delay (months)")[["Project NPV", "LCOE"]]
+        st.line_chart(chart_df, use_container_width=True)
+
+
+def _render_project_finance_analytics(base_assumptions: Assumptions, outputs: ModelOutputs) -> None:
+    _render_solar_threshold_analysis(base_assumptions, outputs)
+    st.divider()
+    _render_debt_sizing_and_sculpting(base_assumptions)
+    st.divider()
+    _render_probability_and_covenant_stress(base_assumptions, outputs)
+    st.divider()
+    _render_lcoe_and_cod_delay(base_assumptions, outputs)
 
 
 def _render_monte_carlo(base_assumptions: Assumptions) -> None:
@@ -5653,120 +6122,6 @@ def _render_monte_carlo(base_assumptions: Assumptions) -> None:
     )
 
 
-def _render_break_even(outputs: ModelOutputs) -> None:
-    """Show break-even and payback diagnostics."""
-
-    st.header("Break-Even & Payback")
-    break_even_rows = _render_break_even_configuration()
-    monthly = outputs.monthly_results
-    cumulative_equity = monthly["equity_cash_flow"].cumsum()
-    breakeven_mask = cumulative_equity >= 0
-    breakeven_date = cumulative_equity.index[breakeven_mask.argmax()] if breakeven_mask.any() else None
-
-    metrics = outputs.metrics
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Project NPV", _format_currency(metrics.get("project_npv", float("nan"))))
-    metric_cols[1].metric("Project IRR", _format_percentage(metrics.get("project_irr", float("nan"))))
-    metric_cols[2].metric(
-        "Payback",
-        _format_metric("project_payback_months", metrics.get("project_payback_months", float("nan"))),
-    )
-
-    if break_even_rows:
-        records: List[Dict[str, object]] = []
-        issues: List[str] = []
-        for row in break_even_rows:
-            product = str(row.get("product", "")).strip() or "Unlabelled"
-            fixed_cost = max(0.0, _coerce_float(row.get("fixed_cost")))
-            variable_cost = max(0.0, _coerce_float(row.get("variable_cost")))
-            price = max(0.0, _coerce_float(row.get("selling_price")))
-            target_profit = max(0.0, _coerce_float(row.get("target_profit")))
-            expected_volume = max(0.0, _coerce_float(row.get("expected_volume")))
-
-            contribution = price - variable_cost
-            contribution_ratio = contribution / price if price > 0 else float("nan")
-
-            if contribution <= 0:
-                break_even_units = float("nan")
-                break_even_revenue = float("nan")
-                margin_of_safety = float("nan")
-                margin_of_safety_ratio = float("nan")
-                issues.append(f"{product}: Contribution margin must be positive to compute break-even.")
-            else:
-                break_even_units = (fixed_cost + target_profit) / contribution
-                break_even_revenue = break_even_units * price
-                margin_of_safety = expected_volume - break_even_units if expected_volume > 0 else float("nan")
-                if expected_volume > 0 and not math.isnan(margin_of_safety):
-                    margin_of_safety_ratio = margin_of_safety / expected_volume
-                else:
-                    margin_of_safety_ratio = float("nan")
-
-            records.append(
-                {
-                    "Product": product,
-                    "Fixed Cost": fixed_cost,
-                    "Variable Cost": variable_cost,
-                    "Selling Price": price,
-                    "Contribution Margin": contribution,
-                    "Contribution Margin %": contribution_ratio,
-                    "Target Profit": target_profit,
-                    "Expected Volume": expected_volume,
-                    "Break-even Units": break_even_units,
-                    "Break-even Revenue": break_even_revenue,
-                    "Margin of Safety": margin_of_safety,
-                    "Margin of Safety %": margin_of_safety_ratio,
-                }
-            )
-
-        if records:
-            st.markdown("#### Break-even Results")
-            results_df = pd.DataFrame(records)
-            formatters = {
-                "Fixed Cost": "{:,.0f}".format,
-                "Variable Cost": "{:,.4f}".format,
-                "Selling Price": "{:,.4f}".format,
-                "Contribution Margin": "{:,.4f}".format,
-                "Contribution Margin %": "{:.2%}".format,
-                "Target Profit": "{:,.0f}".format,
-                "Expected Volume": "{:,.0f}".format,
-                "Break-even Units": "{:,.2f}".format,
-                "Break-even Revenue": "{:,.0f}".format,
-                "Margin of Safety": "{:,.2f}".format,
-                "Margin of Safety %": "{:.2%}".format,
-            }
-            st.dataframe(results_df.style.format(formatters), use_container_width=True)
-
-            chart_df = results_df.set_index("Product")[[
-                col for col in ["Break-even Units", "Expected Volume"] if col in results_df.columns
-            ]]
-            if not chart_df.empty:
-                st.bar_chart(chart_df, use_container_width=True)
-
-            st.download_button(
-                "Download Break-even Table",
-                data=results_df.to_csv(index=False).encode("utf-8"),
-                file_name="break_even_analysis.csv",
-                mime="text/csv",
-            )
-
-        for message in issues:
-            st.error(message)
-
-    if breakeven_date is not None:
-        st.success(f"Break-even reached in {breakeven_date.strftime('%B %Y')}")
-    else:
-        st.warning("Break-even is not reached within the projection horizon.")
-
-    st.markdown("#### Cumulative Equity Cash Flow")
-    cumulative_df = pd.DataFrame(
-        {
-            "Equity Cash Flow": monthly["equity_cash_flow"],
-            "Cumulative Equity": cumulative_equity,
-            "Cumulative FCFF": monthly["fcff"].cumsum(),
-        }
-    )
-    st.line_chart(cumulative_df[["Cumulative Equity", "Cumulative FCFF"]], use_container_width=True)
-    st.dataframe(cumulative_df, use_container_width=True)
 
 _inject_app_theme()
 _render_model_hero()
@@ -5914,7 +6269,7 @@ for page_name, tab in zip(PAGE_OPTIONS[1:], tabs[1:]):
             st.divider()
             _render_monte_carlo(assumptions)
             st.divider()
-            _render_break_even(outputs)
+            _render_project_finance_analytics(assumptions, outputs)
         elif page_name == "AI Benchmark Assistant":
             _render_ai_benchmark_assistant(outputs, assumptions)
         else:
