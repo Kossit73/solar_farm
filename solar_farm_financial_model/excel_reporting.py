@@ -219,6 +219,66 @@ def _annual_schedule(
     return schedule
 
 
+def _annual_series(monthly: pd.DataFrame, column: str) -> pd.Series:
+    if column not in monthly.columns:
+        return pd.Series(dtype=float)
+    annual = monthly[column].resample("Y").sum()
+    annual.index = annual.index.year
+    return annual
+
+
+def _annual_sum_of_columns(monthly: pd.DataFrame, columns: Sequence[str]) -> pd.Series:
+    if not columns:
+        return pd.Series(dtype=float)
+    annual = monthly[list(columns)].sum(axis=1).resample("Y").sum()
+    annual.index = annual.index.year
+    return annual
+
+
+def _build_financial_performance_view(outputs: ModelOutputs) -> pd.DataFrame:
+    monthly = outputs.monthly_results
+    annual = outputs.annual_summary.copy()
+
+    fixed_opex_cols = [column for column in monthly.columns if column.startswith("opex_fixed_")]
+    variable_opex_cols = [column for column in monthly.columns if column.startswith("opex_variable_")]
+    admin_tokens = ("admin", "g_and_a", "general", "administration")
+    admin_opex_cols = [
+        column
+        for column in fixed_opex_cols + variable_opex_cols
+        if any(token in column for token in admin_tokens)
+    ]
+    admin_opex_cols = list(dict.fromkeys(admin_opex_cols))
+
+    years = list(annual.index)
+    change_in_law = _annual_series(monthly, "opex_change_in_law")
+    fixed_opex = _annual_sum_of_columns(monthly, fixed_opex_cols)
+    variable_opex = _annual_sum_of_columns(monthly, variable_opex_cols)
+    administration = _annual_sum_of_columns(monthly, admin_opex_cols)
+
+    statement = pd.DataFrame(index=years)
+    statement.index.name = "Year"
+    statement["Revenue"] = annual.get("revenue_total", pd.Series(index=years, dtype=float))
+    statement["Fixed Operating Expenses"] = fixed_opex.reindex(years, fill_value=0.0)
+    statement["Variable Operating Expenses"] = variable_opex.reindex(years, fill_value=0.0)
+    statement["Administration"] = administration.reindex(years, fill_value=0.0)
+    statement["Change in Law / Other Pass-through Opex"] = change_in_law.reindex(years, fill_value=0.0)
+    statement["Other Operating Expenses"] = (
+        annual.get("total_opex", pd.Series(index=years, dtype=float)).fillna(0.0)
+        - statement["Administration"]
+        - statement["Change in Law / Other Pass-through Opex"]
+    )
+    statement["Total Operating Expenses"] = annual.get("total_opex", pd.Series(index=years, dtype=float))
+    statement["EBITDA"] = annual.get("ebitda", pd.Series(index=years, dtype=float))
+    statement["Depreciation"] = annual.get("depreciation", pd.Series(index=years, dtype=float))
+    statement["EBIT"] = annual.get("ebit", pd.Series(index=years, dtype=float))
+    statement["Interest Expense"] = annual.get("debt_interest", pd.Series(index=years, dtype=float))
+    statement["Other Expenses"] = pd.Series(0.0, index=years)
+    statement["Profit Before Tax"] = statement["EBIT"] - statement["Interest Expense"] - statement["Other Expenses"]
+    statement["Taxes"] = annual.get("tax_payment", pd.Series(index=years, dtype=float))
+    statement["Net Income"] = annual.get("net_income", pd.Series(index=years, dtype=float))
+    return statement.reset_index().rename(columns={"index": "Year", "month_start": "Year"})
+
+
 def _build_balance_sheet_view(outputs: ModelOutputs) -> pd.DataFrame:
     monthly = outputs.monthly_results
     opening_ppe = monthly.get("ppe_opening_balance", pd.Series(0.0, index=monthly.index)).cumsum()
@@ -396,17 +456,7 @@ def append_comprehensive_workbook_sheets(
     monthly_detail = _reset_index_frame(monthly, "Month")
     monthly_detail["Month"] = monthly_detail["Month"].map(_serialise_value)
 
-    performance_cols = [
-        "revenue_total",
-        "total_opex",
-        "ebitda",
-        "ebit",
-        "tax_payment",
-        "net_income",
-        "fcff",
-        "equity_cash_flow",
-    ]
-    performance_df = annual_detail[[column for column in ["Year", *performance_cols] if column in annual_detail.columns]]
+    performance_df = _build_financial_performance_view(outputs)
 
     working_capital_cols = [
         "accounts_receivable",
