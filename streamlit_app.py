@@ -2558,6 +2558,125 @@ def _schedule_increment_state_key(state_key: str) -> str:
     return f"{state_key}_annual_increment_percent"
 
 
+def _schedule_saved_state_key(state_key: str) -> str:
+    return f"{state_key}_saved_rows"
+
+
+def _schedule_work_state_key(state_key: str) -> str:
+    return f"{state_key}_work_rows"
+
+
+def _schedule_editor_open_state_key(state_key: str) -> str:
+    return f"{state_key}_editor_open"
+
+
+def _ensure_rows_have_ids(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    seen_ids: set[str] = set()
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        if not row_id or row_id in seen_ids:
+            row_id = uuid.uuid4().hex
+            row["id"] = row_id
+        seen_ids.add(row_id)
+    return rows
+
+
+def _ensure_schedule_editor_state(
+    state_key: str,
+    default_rows: List[Dict[str, object]] | None = None,
+    *,
+    normalize: Callable[[List[Dict[str, object]]], List[Dict[str, object]]] | None = None,
+) -> None:
+    if state_key not in st.session_state:
+        st.session_state[state_key] = copy.deepcopy(default_rows or [])
+    saved_key = _schedule_saved_state_key(state_key)
+    work_key = _schedule_work_state_key(state_key)
+    editor_key = _schedule_editor_open_state_key(state_key)
+    st.session_state.setdefault(editor_key, False)
+
+    source_rows = copy.deepcopy(st.session_state.get(state_key, default_rows or []))
+    if normalize is not None:
+        source_rows = normalize(source_rows)
+    source_rows = _ensure_rows_have_ids(source_rows)
+
+    if saved_key not in st.session_state:
+        st.session_state[saved_key] = copy.deepcopy(source_rows)
+    if work_key not in st.session_state:
+        st.session_state[work_key] = copy.deepcopy(st.session_state[saved_key])
+
+    if st.session_state[editor_key]:
+        saved_rows = copy.deepcopy(st.session_state[saved_key])
+        work_rows = copy.deepcopy(st.session_state[work_key])
+        if normalize is not None:
+            saved_rows = normalize(saved_rows)
+            work_rows = normalize(work_rows)
+        st.session_state[saved_key] = _ensure_rows_have_ids(saved_rows)
+        st.session_state[work_key] = _ensure_rows_have_ids(work_rows)
+    else:
+        st.session_state[saved_key] = copy.deepcopy(source_rows)
+        st.session_state[work_key] = copy.deepcopy(source_rows)
+
+    st.session_state[state_key] = copy.deepcopy(st.session_state[saved_key])
+
+
+def _schedule_editor_rows(state_key: str) -> List[Dict[str, object]]:
+    if st.session_state.get(_schedule_editor_open_state_key(state_key), False):
+        return st.session_state[_schedule_work_state_key(state_key)]
+    return st.session_state[_schedule_saved_state_key(state_key)]
+
+
+def _set_schedule_editor_rows(state_key: str, rows: List[Dict[str, object]]) -> None:
+    normalized_rows = _ensure_rows_have_ids(copy.deepcopy(rows))
+    if st.session_state.get(_schedule_editor_open_state_key(state_key), False):
+        st.session_state[_schedule_work_state_key(state_key)] = normalized_rows
+    else:
+        st.session_state[_schedule_saved_state_key(state_key)] = normalized_rows
+        st.session_state[state_key] = copy.deepcopy(normalized_rows)
+
+
+def _toggle_schedule_editor(state_key: str) -> None:
+    editor_key = _schedule_editor_open_state_key(state_key)
+    is_open = bool(st.session_state.get(editor_key, False))
+    if is_open:
+        _close_schedule_editor(state_key)
+        return
+    st.session_state[editor_key] = True
+    st.session_state[_schedule_work_state_key(state_key)] = copy.deepcopy(
+        st.session_state[_schedule_saved_state_key(state_key)]
+    )
+
+
+def _save_schedule_editor_changes(state_key: str) -> None:
+    st.session_state[_schedule_saved_state_key(state_key)] = copy.deepcopy(
+        st.session_state[_schedule_work_state_key(state_key)]
+    )
+    st.session_state[state_key] = copy.deepcopy(st.session_state[_schedule_saved_state_key(state_key)])
+
+
+def _discard_schedule_editor_changes(state_key: str) -> None:
+    st.session_state[_schedule_work_state_key(state_key)] = copy.deepcopy(
+        st.session_state[_schedule_saved_state_key(state_key)]
+    )
+
+
+def _close_schedule_editor(state_key: str) -> None:
+    _discard_schedule_editor_changes(state_key)
+    st.session_state[_schedule_editor_open_state_key(state_key)] = False
+    st.session_state[state_key] = copy.deepcopy(st.session_state[_schedule_saved_state_key(state_key)])
+
+
+def _render_schedule_editor_footer(state_key: str) -> None:
+    if not st.session_state.get(_schedule_editor_open_state_key(state_key), False):
+        return
+    save_col, discard_col, close_col = st.columns(3)
+    if save_col.button("Save changes", key=f"{state_key}_save_changes"):
+        _save_schedule_editor_changes(state_key)
+    if discard_col.button("Discard edits", key=f"{state_key}_discard_edits"):
+        _discard_schedule_editor_changes(state_key)
+    if close_col.button("Close editor", key=f"{state_key}_close_editor"):
+        _close_schedule_editor(state_key)
+
+
 def _ensure_labour_row_ids(state_key: str) -> None:
     rows = st.session_state.get(state_key, [])
     seen_ids: set[str] = set()
@@ -2805,35 +2924,46 @@ def _render_equity_sponsor_section() -> None:
 
 def _render_monthly_generation_table() -> List[Dict[str, object]]:
     state_key = "monthly_generation_table"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(MONTHLY_GENERATION_DEFAULTS)
-    _ensure_schedule_row_ids(state_key)
-    rows = st.session_state[state_key]
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(MONTHLY_GENERATION_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+    rows = _schedule_editor_rows(state_key)
     row_options = [str(row.get("id")) for row in rows]
-    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
     if row_options and editing_row_id not in row_options:
         editing_row_id = row_options[0]
 
     st.markdown("### Expected Monthly Production (MWh)")
-    action_cols = st.columns([1.4, 1, 2.8, 1, 1.2])
+    action_cols = st.columns([0.9, 1.35, 1.1, 1.2, 2.8, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
-    increment_percent = action_cols[0].number_input(
+    increment_percent = action_cols[1].number_input(
         "Annual Increment (%)",
         key=increment_key,
         min_value=-100.0,
         step=0.5,
         format="%.2f",
         help="Apply the same percentage change to each monthly production row.",
+        disabled=not edit_mode,
     )
-    if action_cols[1].button("Apply Increment", key=f"{state_key}_apply_increment"):
-        st.session_state[state_key] = _apply_flat_increment(
-            st.session_state[state_key],
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_flat_increment(
+            rows,
             ("expected_mwh",),
             float(increment_percent),
             minimum=0.0,
         )
-        rows = st.session_state[state_key]
+        _set_schedule_editor_rows(state_key, rows)
         row_options = [str(row.get("id")) for row in rows]
         editing_row_id = editing_row_id if editing_row_id in row_options else (row_options[0] if row_options else "")
 
@@ -2846,45 +2976,51 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
     }
 
     if row_options:
-        editing_row_id = action_cols[2].selectbox(
+        editing_row_id = action_cols[4].selectbox(
             "Edit row",
             options=row_options,
             index=row_options.index(editing_row_id),
             format_func=lambda row_id: row_labels.get(row_id, row_id),
             key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
         )
         st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
     else:
-        action_cols[2].caption("Edit row")
+        action_cols[4].caption("Edit row")
         editing_row_id = ""
 
-    if action_cols[3].button("Remove", key=f"{state_key}_remove_selected", disabled=not bool(editing_row_id)):
-        st.session_state[state_key] = [row for row in st.session_state[state_key] if str(row.get("id")) != editing_row_id]
-        rows = st.session_state[state_key]
+    if action_cols[5].button(
+        "Remove",
+        key=f"{state_key}_remove_selected",
+        disabled=not (edit_mode and bool(editing_row_id)),
+    ):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
         row_options = [str(row.get("id")) for row in rows]
         editing_row_id = row_options[0] if row_options else ""
         st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
 
-    if action_cols[4].button("Add Row", key=f"{state_key}_add"):
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
         used_months = {
             str(row.get("month", "")).strip()
-            for row in st.session_state[state_key]
+            for row in rows
         }
         default_month = next(
             (month_name for month_name in MONTH_NAME_OPTIONS if month_name not in used_months),
-            f"Month {len(st.session_state[state_key]) + 1}",
+            f"Month {len(rows) + 1}",
         )
-        st.session_state[state_key].append(
+        rows.append(
             {
                 "id": uuid.uuid4().hex,
                 "month": default_month,
                 "expected_mwh": 0.0,
             }
         )
-        editing_row_id = str(st.session_state[state_key][-1]["id"])
+        _set_schedule_editor_rows(state_key, rows)
+        editing_row_id = str(rows[-1]["id"])
         st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
 
-    rows = st.session_state[state_key]
+    rows = _schedule_editor_rows(state_key)
     updated_rows: List[Dict[str, object]] = []
 
     for idx, row in enumerate(rows):
@@ -2895,7 +3031,7 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
         )
 
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
                 st.markdown(f"**Editing:** {str(row.get('month', '')).strip() or f'Month {idx + 1}'}")
                 edit_cols = st.columns([2.4, 1.6, 0.8])
@@ -2916,17 +3052,19 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
                 )
                 if edit_cols[2].button("Done", key=f"{state_key}_done_{row_id}"):
                     st.session_state[_schedule_edit_state_key(state_key)] = row_id
-                    editing_row_id = row_id
 
         updated_rows.append(updated_row)
 
-    st.session_state[state_key] = updated_rows
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
-    if updated_rows:
-        if len(updated_rows) != 12:
+    committed_rows = st.session_state[state_key]
+    if committed_rows:
+        if len(committed_rows) != 12:
             st.warning("Monthly production table should include 12 months to align with the model timeline.")
 
-    return updated_rows
+    return committed_rows
 
 
 def _render_projection_horizon_section() -> Tuple[int, int]:
@@ -3001,10 +3139,10 @@ def _derived_panel_count(solar_panels_amount: float, panel_unit_cost: float) -> 
 def _render_initial_investment_section() -> None:
     _ensure_initial_investment_state()
     state_key = "initial_investment"
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(st.session_state[state_key]))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
     st.markdown("### Initial Investment Input Table")
 
-    rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
     method_options = ["Straight-Line", "Declining Balance"]
     start_year, _ = _projection_year_bounds()
     year_options = _projection_year_options()
@@ -3027,117 +3165,203 @@ def _render_initial_investment_section() -> None:
         12: "Dec",
     }
 
-    for idx, row in enumerate(rows):
-        row_id = row.get("id") or uuid.uuid4().hex
-        row["id"] = row_id
-        with st.container(border=True):
-            col_name, col_amount, col_life, col_method = st.columns([3, 2, 1.5, 1.5])
-            name = col_name.text_input(
-                "Investment Item",
-                value=str(row.get("name", "")),
-                key=f"{state_key}_name_{row_id}",
-            )
-            amount = col_amount.number_input(
-                "Amount",
-                value=float(row.get("amount", 0.0)),
-                key=f"{state_key}_amount_{row_id}",
-                min_value=0.0,
-                step=1000.0,
-                format="%.2f",
-            )
-            depreciation_years = col_life.number_input(
-                "Depreciation Years",
-                value=float(row.get("depreciation_years", 1.0)),
-                key=f"{state_key}_life_{row_id}",
-                min_value=0.0,
-                step=1.0,
-                help="Use 0 for non-depreciable items such as land.",
-            )
-            method_value = str(row.get("method", method_options[0]))
-            if method_value not in method_options:
-                method_value = method_options[0]
-            method = col_method.selectbox(
-                "Method",
-                method_options,
-                index=method_options.index(method_value),
-                key=f"{state_key}_method_{row_id}",
-            )
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
 
-            col_year, col_month, col_service, col_remove = st.columns([1.5, 1.5, 1.5, 1])
-            current_year = int(row.get("year", year_options[0]))
-            if current_year not in year_options:
-                current_year = year_options[0]
-            year = col_year.selectbox(
-                "Service Year",
-                options=year_options,
-                index=year_options.index(current_year),
-                key=f"{state_key}_year_{row_id}",
-            )
-            current_month = int(row.get("month", 1))
-            if current_month not in month_options:
-                current_month = 1
-            month = col_month.selectbox(
-                "Service Month",
-                options=month_options,
-                index=month_options.index(current_month),
-                format_func=lambda m: month_labels.get(m, str(m)),
-                key=f"{state_key}_month_{row_id}",
-            )
-            service_month = col_service.number_input(
-                "Service Month #",
-                value=float(row.get("service_month", (year - start_year) * 12 + month)),
-                key=f"{state_key}_service_{row_id}",
-                min_value=1.0,
-                step=1.0,
-            )
-            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{row_id}")
-
-            col_profile, col_opening, col_rate = st.columns([3, 2, 1.5])
-            profile_value = str(row.get("spend_profile", "1.0"))
-            spend_profile = col_profile.text_input(
-                "Spend Profile",
-                value=profile_value,
-                key=f"{state_key}_profile_{row_id}",
-                help="Comma separated weights (e.g. 0.5, 0.5). Values above 1 are treated as percentages.",
-            )
-            opening_balance = col_opening.number_input(
-                "Opening Balance",
-                value=float(row.get("opening_balance", 0.0)),
-                key=f"{state_key}_opening_{row_id}",
-                min_value=0.0,
-                step=1000.0,
-                format="%.2f",
-            )
-            depreciation_rate_percent = col_rate.number_input(
-                "Depreciation Rate (%)",
-                value=float(row.get("depreciation_rate", 0.0)) * 100.0,
-                key=f"{state_key}_rate_{row_id}",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.1,
-                format="%.2f",
-            )
-
-        if remove_clicked:
-            continue
-
-        updated_rows.append(
-            {
-                "id": row_id,
-                "name": name,
-                "amount": amount,
-                "depreciation_years": depreciation_years,
-                "method": method,
-                "year": year,
-                "month": month,
-                "spend_profile": spend_profile,
-                "opening_balance": opening_balance,
-                "depreciation_rate": depreciation_rate_percent / 100.0,
-                "service_month": service_month,
-            }
+    action_cols = st.columns([0.9, 1.3, 1.1, 1.2, 3.1, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
         )
 
-    st.session_state[state_key] = updated_rows
+    increment_key = _schedule_increment_state_key(state_key)
+    st.session_state.setdefault(increment_key, 0.0)
+    increment_percent = action_cols[1].number_input(
+        "Annual Increment (%)",
+        key=increment_key,
+        min_value=-100.0,
+        step=0.5,
+        format="%.2f",
+        help="Cascade CAPEX amount and opening balance from the prior investment year.",
+        disabled=not edit_mode,
+    )
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
+            ("amount", "opening_balance"),
+            float(increment_percent),
+            year_field="year",
+            minimum=0.0,
+        )
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = editing_row_id if editing_row_id in row_options else (row_options[0] if row_options else "")
+
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        template = copy.deepcopy(rows[-1]) if rows else {
+            "name": "New Investment",
+            "amount": 0.0,
+            "depreciation_years": 5.0,
+            "method": "Straight-Line",
+            "year": year_options[0],
+            "month": 1,
+            "spend_profile": "1.0",
+            "opening_balance": 0.0,
+            "depreciation_rate": 0.0,
+            "service_month": 1.0,
+        }
+        template["id"] = uuid.uuid4().hex
+        rows.append(template)
+        _set_schedule_editor_rows(state_key, rows)
+        editing_row_id = str(template["id"])
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('name', 'Investment')).strip() or 'Investment'} | "
+            f"Year {int(row.get('year', year_options[0]))} | "
+            f"${float(row.get('amount', 0.0)):,.2f}"
+        )
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[4].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[4].caption("Edit row")
+        editing_row_id = ""
+
+    if action_cols[5].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
+    updated_rows: List[Dict[str, object]] = []
+    for idx, row in enumerate(rows):
+        row_id = str(row.get("id"))
+        st.markdown(
+            f"**{str(row.get('name', '')).strip() or f'Investment {idx + 1}'}**  |  "
+            f"Year {int(row.get('year', year_options[0]))}  |  "
+            f"Amount ${float(row.get('amount', 0.0)):,.2f}  |  "
+            f"{str(row.get('method', method_options[0]))}"
+        )
+
+        updated_row = copy.deepcopy(row)
+        if edit_mode and editing_row_id == row_id:
+            with st.container(border=True):
+                st.markdown(f"**Editing:** {option_labels.get(row_id, row_id)}")
+                col_name, col_amount, col_life, col_method = st.columns([3, 2, 1.5, 1.5])
+                updated_row["name"] = col_name.text_input(
+                    "Investment Item",
+                    value=str(row.get("name", "")),
+                    key=f"{state_key}_name_{row_id}",
+                )
+                updated_row["amount"] = col_amount.number_input(
+                    "Amount",
+                    value=float(row.get("amount", 0.0)),
+                    key=f"{state_key}_amount_{row_id}",
+                    min_value=0.0,
+                    step=1000.0,
+                    format="%.2f",
+                )
+                updated_row["depreciation_years"] = col_life.number_input(
+                    "Depreciation Years",
+                    value=float(row.get("depreciation_years", 1.0)),
+                    key=f"{state_key}_life_{row_id}",
+                    min_value=0.0,
+                    step=1.0,
+                    help="Use 0 for non-depreciable items such as land.",
+                )
+                method_value = str(row.get("method", method_options[0]))
+                if method_value not in method_options:
+                    method_value = method_options[0]
+                updated_row["method"] = col_method.selectbox(
+                    "Method",
+                    method_options,
+                    index=method_options.index(method_value),
+                    key=f"{state_key}_method_{row_id}",
+                )
+
+                col_year, col_month, col_service = st.columns([1.5, 1.5, 1.5])
+                current_year = int(row.get("year", year_options[0]))
+                if current_year not in year_options:
+                    current_year = year_options[0]
+                updated_row["year"] = col_year.selectbox(
+                    "Service Year",
+                    options=year_options,
+                    index=year_options.index(current_year),
+                    key=f"{state_key}_year_{row_id}",
+                )
+                current_month = int(row.get("month", 1))
+                if current_month not in month_options:
+                    current_month = 1
+                updated_row["month"] = col_month.selectbox(
+                    "Service Month",
+                    options=month_options,
+                    index=month_options.index(current_month),
+                    format_func=lambda m: month_labels.get(m, str(m)),
+                    key=f"{state_key}_month_{row_id}",
+                )
+                updated_row["service_month"] = col_service.number_input(
+                    "Service Month #",
+                    value=float(row.get("service_month", (updated_row["year"] - start_year) * 12 + updated_row["month"])),
+                    key=f"{state_key}_service_{row_id}",
+                    min_value=1.0,
+                    step=1.0,
+                )
+
+                col_profile, col_opening, col_rate = st.columns([3, 2, 1.5])
+                updated_row["spend_profile"] = col_profile.text_input(
+                    "Spend Profile",
+                    value=str(row.get("spend_profile", "1.0")),
+                    key=f"{state_key}_profile_{row_id}",
+                    help="Comma separated weights (e.g. 0.5, 0.5). Values above 1 are treated as percentages.",
+                )
+                updated_row["opening_balance"] = col_opening.number_input(
+                    "Opening Balance",
+                    value=float(row.get("opening_balance", 0.0)),
+                    key=f"{state_key}_opening_{row_id}",
+                    min_value=0.0,
+                    step=1000.0,
+                    format="%.2f",
+                )
+                depreciation_rate_percent = col_rate.number_input(
+                    "Depreciation Rate (%)",
+                    value=float(row.get("depreciation_rate", 0.0)) * 100.0,
+                    key=f"{state_key}_rate_{row_id}",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.1,
+                    format="%.2f",
+                )
+                updated_row["depreciation_rate"] = depreciation_rate_percent / 100.0
+        updated_rows.append(updated_row)
+
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
     _sync_initial_investment_to_fixed_assets()
 
     total_equity = sum(float(row.get("amount", 0.0)) for row in st.session_state[state_key])
@@ -3164,24 +3388,6 @@ def _render_initial_investment_section() -> None:
         "a separate fixed asset editor is no longer required."
     )
 
-    if st.button("Add Investment Item", key=f"{state_key}_add"):
-        st.session_state[state_key].append(
-            {
-                "id": uuid.uuid4().hex,
-                "name": "New Investment",
-                "amount": 0.0,
-                "depreciation_years": 5.0,
-                "method": "Straight-Line",
-                "year": year_options[0],
-                "month": 1,
-                "spend_profile": "1.0",
-                "opening_balance": 0.0,
-                "depreciation_rate": 0.0,
-                "service_month": 1.0,
-            }
-        )
-        _sync_initial_investment_to_fixed_assets()
-
 
 def _render_labour_structure_section() -> None:
     state_key = "labour_structure"
@@ -3192,13 +3398,13 @@ def _render_labour_structure_section() -> None:
     )
 
     year_columns = _labour_year_columns()
-    current_rows = st.session_state.get(state_key)
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(default_labour_rows(year_columns))
-    normalized_rows = normalize_labour_rows(current_rows, year_columns)
-    st.session_state[state_key] = copy.deepcopy(normalized_rows)
-    _ensure_labour_row_ids(state_key)
-    rows = st.session_state[state_key]
+    _ensure_schedule_editor_state(
+        state_key,
+        copy.deepcopy(default_labour_rows(year_columns)),
+        normalize=lambda rows: normalize_labour_rows(rows, year_columns),
+    )
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+    rows = _schedule_editor_rows(state_key)
     row_options = [str(row.get("id")) for row in rows]
     editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
     if row_options and editing_row_id not in row_options:
@@ -3211,45 +3417,56 @@ def _render_labour_structure_section() -> None:
         year_one = _coerce_float(row.get(year_columns[0])) if year_columns else 0.0
         row_labels[row_id] = f"{role} | {year_columns[0] if year_columns else 'Year 1'} {year_one:.2f} FTE"
 
-    action_cols = st.columns([1.3, 1.4, 3.6, 1.1, 1.1])
+    action_cols = st.columns([0.9, 1.3, 1.4, 3.6, 1.1, 1.1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
-    increment_percent = action_cols[0].number_input(
+    increment_percent = action_cols[1].number_input(
         "Annual Increment (%)",
         key=increment_key,
         min_value=-100.0,
         step=0.5,
         format="%.2f",
         help="Apply a yearly increment to the Year 2..N labour schedule for every row using the prior year as the base.",
+        disabled=not edit_mode,
     )
-    if action_cols[1].button("Apply Yearly Increment", key=f"{state_key}_apply_yearly_increment"):
-        st.session_state[state_key] = _apply_labour_yearly_increment(st.session_state[state_key], year_columns, float(increment_percent))
-        rows = st.session_state[state_key]
+    if action_cols[2].button("Apply Yearly Increment", key=f"{state_key}_apply_yearly_increment", disabled=not edit_mode):
+        rows = _apply_labour_yearly_increment(rows, year_columns, float(increment_percent))
+        _set_schedule_editor_rows(state_key, rows)
         row_options = [str(row.get("id")) for row in rows]
         editing_row_id = editing_row_id if editing_row_id in row_options else (row_options[0] if row_options else "")
 
     if row_options:
-        editing_row_id = action_cols[2].selectbox(
+        editing_row_id = action_cols[3].selectbox(
             "Edit row",
             options=row_options,
             index=row_options.index(editing_row_id),
             format_func=lambda row_id: row_labels.get(row_id, row_id),
             key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
         )
         st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
     else:
-        action_cols[2].caption("Edit row")
+        action_cols[3].caption("Edit row")
         editing_row_id = ""
 
-    if action_cols[3].button("Remove", key=f"{state_key}_remove_selected", disabled=not bool(editing_row_id)):
-        st.session_state[state_key] = [row for row in st.session_state[state_key] if str(row.get("id")) != editing_row_id]
-        remaining_ids = [str(row.get("id")) for row in st.session_state[state_key]]
+    if action_cols[4].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        remaining_ids = [str(row.get("id")) for row in rows]
         st.session_state[_schedule_edit_state_key(state_key)] = remaining_ids[0] if remaining_ids else None
-        rows = st.session_state[state_key]
         row_options = remaining_ids
         editing_row_id = remaining_ids[0] if remaining_ids else ""
 
-    if action_cols[4].button("Add Row", key=f"{state_key}_add_row"):
+    if action_cols[5].button("Add Row", key=f"{state_key}_add_row", disabled=not edit_mode):
         new_row = normalize_labour_rows(
             [
                 {
@@ -3269,10 +3486,9 @@ def _render_labour_structure_section() -> None:
             ],
             year_columns,
         )[0]
-        st.session_state[state_key].append(new_row)
+        rows.append(new_row)
+        _set_schedule_editor_rows(state_key, rows)
         st.session_state[_schedule_edit_state_key(state_key)] = str(new_row.get("id"))
-        rows = st.session_state[state_key]
-        row_options = [str(row.get("id")) for row in rows]
         editing_row_id = str(new_row.get("id"))
 
     st.caption("Edit one labour row at a time; yearly increment applies across the Year columns for all rows.")
@@ -3281,7 +3497,7 @@ def _render_labour_structure_section() -> None:
     for row in rows:
         row_id = str(row.get("id"))
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
                 st.markdown(f"**Editing:** {row_labels.get(row_id, row_id)}")
                 identity_cols = st.columns([1.5, 1.1, 1.1, 1.2])
@@ -3368,7 +3584,9 @@ def _render_labour_structure_section() -> None:
                         )
         updated_rows.append(updated_row)
 
-    st.session_state[state_key] = normalize_labour_rows(updated_rows, year_columns)
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, normalize_labour_rows(updated_rows, year_columns))
+    _render_schedule_editor_footer(state_key)
 
     if st.session_state[state_key]:
         labour_df = pd.DataFrame(st.session_state[state_key])
@@ -3386,146 +3604,245 @@ def _render_labour_structure_section() -> None:
 
 def _render_operating_expense_section() -> None:
     state_key = "operating_expenses"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(OPERATING_EXPENSE_DEFAULTS)
-
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(OPERATING_EXPENSE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
     st.markdown("### Operating Expenses Input Table")
-    rows = st.session_state[state_key]
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+
+    action_cols = st.columns([0.9, 1.3, 1.1, 1.2, 3.1, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
+    increment_key = _schedule_increment_state_key(state_key)
+    st.session_state.setdefault(increment_key, 0.0)
+    increment_percent = action_cols[1].number_input(
+        "Annual Increment (%)",
+        key=increment_key,
+        min_value=-100.0,
+        step=0.5,
+        format="%.2f",
+        help="Apply the same escalation to annual fixed cost and variable cost rows.",
+        disabled=not edit_mode,
+    )
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_flat_increment(
+            rows,
+            ("fixed_cost", "variable_cost"),
+            float(increment_percent),
+            minimum=0.0,
+        )
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = editing_row_id if editing_row_id in row_options else (row_options[0] if row_options else "")
+
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        new_row = {
+            "id": uuid.uuid4().hex,
+            "name": "New Expense",
+            "fixed_cost": 0.0,
+            "variable_cost": 0.0,
+            "inflation_rate": 0.0,
+        }
+        rows.append(new_row)
+        _set_schedule_editor_rows(state_key, rows)
+        editing_row_id = str(new_row["id"])
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('name', 'Expense')).strip() or 'Expense'} | "
+            f"Fixed ${float(row.get('fixed_cost', 0.0)):,.2f} | "
+            f"Variable ${float(row.get('variable_cost', 0.0)):,.4f}/MWh"
+        )
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[4].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[4].caption("Edit row")
+        editing_row_id = ""
+
+    if action_cols[5].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
     updated_rows: List[Dict[str, object]] = []
     for row in rows:
-        row_id = row.get("id") or uuid.uuid4().hex
-        row["id"] = row_id
-        with st.container(border=True):
-            col_name, col_fixed, col_variable, col_infl, col_remove = st.columns([3, 2, 2, 2, 1])
-            name = col_name.text_input(
-                "Expense Item",
-                value=str(row.get("name", "")),
-                key=f"{state_key}_name_{row_id}",
-            )
-            fixed_cost = col_fixed.number_input(
-                "Annual Fixed Cost",
-                value=float(row.get("fixed_cost", 0.0)),
-                key=f"{state_key}_fixed_{row_id}",
-                min_value=0.0,
-                step=1000.0,
-                format="%.2f",
-            )
-            variable_cost = col_variable.number_input(
-                "Variable Cost per MWh",
-                value=float(row.get("variable_cost", 0.0)),
-                key=f"{state_key}_variable_{row_id}",
-                min_value=0.0,
-                step=0.01,
-                format="%.4f",
-            )
+        row_id = str(row.get("id"))
+        st.markdown(f"**{option_labels.get(row_id, row_id)}**")
+        updated_row = copy.deepcopy(row)
+        if edit_mode and editing_row_id == row_id:
+            with st.container(border=True):
+                col_name, col_fixed, col_variable, col_infl = st.columns([3, 2, 2, 2])
+                updated_row["name"] = col_name.text_input(
+                    "Expense Item",
+                    value=str(row.get("name", "")),
+                    key=f"{state_key}_name_{row_id}",
+                )
+                updated_row["fixed_cost"] = col_fixed.number_input(
+                    "Annual Fixed Cost",
+                    value=float(row.get("fixed_cost", 0.0)),
+                    key=f"{state_key}_fixed_{row_id}",
+                    min_value=0.0,
+                    step=1000.0,
+                    format="%.2f",
+                )
+                updated_row["variable_cost"] = col_variable.number_input(
+                    "Variable Cost per MWh",
+                    value=float(row.get("variable_cost", 0.0)),
+                    key=f"{state_key}_variable_{row_id}",
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.4f",
+                )
+                inflation_percent = col_infl.number_input(
+                    "Annual Escalation (%)",
+                    value=float(row.get("inflation_rate", 0.0)) * 100.0,
+                    key=f"{state_key}_inflation_{row_id}",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.1,
+                    format="%.2f",
+                )
+                updated_row["inflation_rate"] = float(inflation_percent) / 100.0
+        updated_rows.append(updated_row)
 
-            inflation_percent = col_infl.number_input(
-                "Annual Escalation (%)",
-                value=float(row.get("inflation_rate", 0.0)) * 100.0,
-                key=f"{state_key}_inflation_{row_id}",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.1,
-                format="%.2f",
-            )
-
-            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{row_id}")
-
-        if remove_clicked:
-            for suffix in ("name", "fixed", "variable", "inflation"):
-                st.session_state.pop(f"{state_key}_{suffix}_{row_id}", None)
-            continue
-
-        updated_rows.append(
-            {
-                "id": row_id,
-                "name": name,
-                "fixed_cost": float(fixed_cost),
-                "variable_cost": float(variable_cost),
-                "inflation_rate": float(inflation_percent) / 100.0,
-            }
-        )
-
-    st.session_state[state_key] = updated_rows
-
-    if st.button("Add Expense Item", key=f"{state_key}_add"):
-        new_id = uuid.uuid4().hex
-        st.session_state[state_key].append(
-            {
-                "id": new_id,
-                "name": "New Expense",
-                "fixed_cost": 0.0,
-                "variable_cost": 0.0,
-                "inflation_rate": 0.0,
-            }
-        )
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
 
 def _render_accounts_receivable_section() -> None:
     state_key = "accounts_receivable"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(ACCOUNTS_RECEIVABLE_DEFAULTS)
-    _ensure_schedule_row_ids(state_key)
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(ACCOUNTS_RECEIVABLE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
 
     st.markdown("### Accounts Receivable Input Table")
     start_year, _ = _projection_year_bounds()
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
-    action_cols = st.columns([1.4, 1, 1, 3.6])
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+
+    action_cols = st.columns([0.9, 1.4, 1, 1, 3.2, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
-    increment_percent = action_cols[0].number_input(
+    increment_percent = action_cols[1].number_input(
         "Annual Increment (%)",
         key=increment_key,
         min_value=-100.0,
         step=0.5,
         format="%.2f",
         help="Cascade receivable and working-capital day assumptions year over year from the first row.",
+        disabled=not edit_mode,
     )
-    if action_cols[1].button("Apply Increment", key=f"{state_key}_apply_increment"):
-        st.session_state[state_key] = _apply_sequential_annual_increment(
-            st.session_state[state_key],
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
             ("receivable_days", "prepaid_expense_days", "other_asset_days"),
             float(increment_percent),
             year_field="year",
             minimum=0.0,
         )
-    if action_cols[2].button("Add Row", key=f"{state_key}_add"):
-        template = copy.deepcopy(st.session_state[state_key][-1]) if st.session_state[state_key] else {
+        _set_schedule_editor_rows(state_key, rows)
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        template = copy.deepcopy(rows[-1]) if rows else {
             "days_in_year": 365,
             "receivable_days": 45,
             "prepaid_expense_days": 30,
             "other_asset_days": 5,
         }
         template["id"] = uuid.uuid4().hex
-        template["year"] = _next_projection_year_for_rows(st.session_state[state_key], year_options, start_year)
-        st.session_state[state_key].append(template)
+        template["year"] = _next_projection_year_for_rows(rows, year_options, start_year)
+        rows.append(template)
+        _set_schedule_editor_rows(state_key, rows)
         st.session_state[_schedule_edit_state_key(state_key)] = template["id"]
 
-    rows = st.session_state[state_key]
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"Year {int(row.get('year', year_options[0]))} | "
+            f"AR {float(row.get('receivable_days', 0.0)):,.1f} days | "
+            f"Prepaid {float(row.get('prepaid_expense_days', 0.0)):,.1f} days | "
+            f"Other {float(row.get('other_asset_days', 0.0)):,.1f} days"
+        )
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[4].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[4].caption("Edit row")
+        editing_row_id = ""
+
+    if action_cols[5].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
     updated_rows: List[Dict[str, object]] = []
-    editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
     for idx, row in enumerate(rows):
         row_id = str(row.get("id"))
-        summary_cols = st.columns([3.8, 1.2, 1])
-        summary_cols[0].markdown(
-            f"**{int(row.get('year', year_options[0]))}**  |  AR {float(row.get('receivable_days', 0.0)):,.1f} days  |  "
-            f"Prepaid {float(row.get('prepaid_expense_days', 0.0)):,.1f} days  |  Other {float(row.get('other_asset_days', 0.0)):,.1f} days"
-        )
-        if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
-            st.session_state[_schedule_edit_state_key(state_key)] = row_id
-            editing_row_id = row_id
-        remove_clicked = summary_cols[2].button("Remove", key=f"{state_key}_remove_{row_id}")
-        if remove_clicked:
-            if editing_row_id == row_id:
-                st.session_state[_schedule_edit_state_key(state_key)] = None
-            continue
-
+        st.markdown(f"**{option_labels.get(row_id, row_id)}**")
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
-                col_year, col_days, col_ar_days, col_prepaid, col_other, col_done = st.columns([1.2, 1, 1, 1, 1, 0.8])
+                col_year, col_days, col_ar_days, col_prepaid, col_other = st.columns([1.2, 1, 1, 1, 1])
                 current_year = int(row.get("year", year_options[0]))
                 if current_year not in year_options:
                     current_year = year_options[0]
@@ -3564,77 +3881,114 @@ def _render_accounts_receivable_section() -> None:
                     min_value=0.0,
                     step=1.0,
                 )
-                if col_done.button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = None
-                    editing_row_id = None
         updated_rows.append(updated_row)
-    st.session_state[state_key] = updated_rows
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
 
 def _render_inventory_payables_section() -> None:
     state_key = "inventory_payables"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(INVENTORY_PAYABLE_DEFAULTS)
-    _ensure_schedule_row_ids(state_key)
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(INVENTORY_PAYABLE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
 
     st.markdown("### Inventory & Accounts Payable Input Table")
     start_year, _ = _projection_year_bounds()
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
-    action_cols = st.columns([1.4, 1, 1, 3.6])
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+
+    action_cols = st.columns([0.9, 1.4, 1, 1, 3.2, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
-    increment_percent = action_cols[0].number_input(
+    increment_percent = action_cols[1].number_input(
         "Annual Increment (%)",
         key=increment_key,
         min_value=-100.0,
         step=0.5,
         format="%.2f",
         help="Cascade inventory and payable day assumptions year over year from the first row.",
+        disabled=not edit_mode,
     )
-    if action_cols[1].button("Apply Increment", key=f"{state_key}_apply_increment"):
-        st.session_state[state_key] = _apply_sequential_annual_increment(
-            st.session_state[state_key],
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
             ("inventory_days", "accounts_payable_days"),
             float(increment_percent),
             year_field="year",
             minimum=0.0,
         )
-    if action_cols[2].button("Add Row", key=f"{state_key}_add"):
-        template = copy.deepcopy(st.session_state[state_key][-1]) if st.session_state[state_key] else {
+        _set_schedule_editor_rows(state_key, rows)
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        template = copy.deepcopy(rows[-1]) if rows else {
             "days_in_year": 365,
             "inventory_days": 50,
             "accounts_payable_days": 45,
         }
         template["id"] = uuid.uuid4().hex
-        template["year"] = _next_projection_year_for_rows(st.session_state[state_key], year_options, start_year)
-        st.session_state[state_key].append(template)
+        template["year"] = _next_projection_year_for_rows(rows, year_options, start_year)
+        rows.append(template)
+        _set_schedule_editor_rows(state_key, rows)
         st.session_state[_schedule_edit_state_key(state_key)] = template["id"]
 
-    rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
-    editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
-    for idx, row in enumerate(rows):
-        row_id = str(row.get("id"))
-        summary_cols = st.columns([3.8, 1.2, 1])
-        summary_cols[0].markdown(
-            f"**{int(row.get('year', year_options[0]))}**  |  Inventory {float(row.get('inventory_days', 0.0)):,.1f} days  |  "
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"Year {int(row.get('year', year_options[0]))} | "
+            f"Inventory {float(row.get('inventory_days', 0.0)):,.1f} days | "
             f"Payables {float(row.get('accounts_payable_days', 0.0)):,.1f} days"
         )
-        if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
-            st.session_state[_schedule_edit_state_key(state_key)] = row_id
-            editing_row_id = row_id
-        remove_clicked = summary_cols[2].button("Remove", key=f"{state_key}_remove_{row_id}")
-        if remove_clicked:
-            if editing_row_id == row_id:
-                st.session_state[_schedule_edit_state_key(state_key)] = None
-            continue
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[4].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[4].caption("Edit row")
+        editing_row_id = ""
 
+    if action_cols[5].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
+    updated_rows: List[Dict[str, object]] = []
+    for idx, row in enumerate(rows):
+        row_id = str(row.get("id"))
+        st.markdown(f"**{option_labels.get(row_id, row_id)}**")
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
-                col_year, col_days, col_inventory, col_payable, col_done = st.columns([1.2, 1, 1, 1, 0.8])
+                col_year, col_days, col_inventory, col_payable = st.columns([1.2, 1, 1, 1])
                 current_year = int(row.get("year", year_options[0]))
                 if current_year not in year_options:
                     current_year = year_options[0]
@@ -3666,23 +4020,34 @@ def _render_inventory_payables_section() -> None:
                     min_value=0.0,
                     step=1.0,
                 )
-                if col_done.button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = None
-                    editing_row_id = None
         updated_rows.append(updated_row)
-    st.session_state[state_key] = updated_rows
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
 
 def _render_loan_schedule_section() -> None:
     state_key = "loan_schedule"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(LOAN_SCHEDULE_DEFAULTS)
-    _ensure_schedule_row_ids(state_key)
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(LOAN_SCHEDULE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
     if "loan_base_rate" not in st.session_state:
         st.session_state["loan_base_rate"] = 0.06
 
     st.markdown("### Loan Schedule")
-    base_rate_col, add_col, _ = st.columns([1, 1, 2])
+    start_year, _ = _projection_year_bounds()
+    year_options = _projection_year_options()
+    if not year_options:
+        year_options = [start_year]
+
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+
+    base_rate_col, edit_col, increment_col, increment_btn_col, add_col, selector_col, remove_col = st.columns([1, 0.8, 1.2, 1, 1, 2.8, 1])
     st.session_state["loan_base_rate"] = base_rate_col.number_input(
         "Base Interest Rate",
         value=float(st.session_state["loan_base_rate"]),
@@ -3691,52 +4056,101 @@ def _render_loan_schedule_section() -> None:
         step=0.005,
         format="%.3f",
     )
+    if edit_col.button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
 
-    start_year, _ = _projection_year_bounds()
-    year_options = _projection_year_options()
-    if not year_options:
-        year_options = [start_year]
+    increment_key = _schedule_increment_state_key(state_key)
+    st.session_state.setdefault(increment_key, 0.0)
+    increment_percent = increment_col.number_input(
+        "Annual Increment (%)",
+        key=increment_key,
+        min_value=-100.0,
+        step=0.5,
+        format="%.2f",
+        help="Cascade loan sizing amounts year over year from the first facility row.",
+        disabled=not edit_mode,
+    )
+    if increment_btn_col.button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
+            ("amount",),
+            float(increment_percent),
+            year_field="year",
+            minimum=0.0,
+        )
+        _set_schedule_editor_rows(state_key, rows)
 
-    if add_col.button("Add Row", key=f"{state_key}_add"):
-        next_year = _next_projection_year_for_rows(st.session_state[state_key], year_options, start_year)
+    if add_col.button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        next_year = _next_projection_year_for_rows(rows, year_options, start_year)
         new_row = {
             "id": uuid.uuid4().hex,
-            "name": f"Facility {len(st.session_state[state_key]) + 1}",
+            "name": f"Facility {len(rows) + 1}",
             "year": next_year,
             "duration_years": 5,
             "amount": 1_000_000.0,
             "interest_rate": st.session_state["loan_base_rate"],
         }
-        st.session_state[state_key].append(new_row)
+        rows.append(new_row)
+        _set_schedule_editor_rows(state_key, rows)
         st.session_state[_schedule_edit_state_key(state_key)] = new_row["id"]
 
-    rows = st.session_state[state_key]
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('name', 'Facility')).strip() or 'Facility'} | "
+            f"Year {int(row.get('year', year_options[0]))} | "
+            f"${float(row.get('amount', 0.0)):,.2f} | "
+            f"{int(max(1, row.get('duration_years', 1)))} years"
+        )
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = selector_col.selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        selector_col.caption("Edit row")
+        editing_row_id = ""
+
+    if remove_col.button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
     updated_rows: List[Dict[str, object]] = []
-    editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
 
     for idx, row in enumerate(rows):
         row_id = str(row.get("id"))
-        summary_cols = st.columns([4.2, 1.2, 1])
-        summary_cols[0].markdown(
+        st.markdown(
             f"**{str(row.get('name', f'Facility {idx + 1}'))}**  |  "
             f"Year {int(row.get('year', year_options[0]))}  |  "
             f"Duration {int(max(1, row.get('duration_years', 1)))} years  |  "
             f"Amount ${float(row.get('amount', 0.0)):,.2f}  |  "
             f"Rate {float(row.get('interest_rate', st.session_state['loan_base_rate'])):.3f}"
         )
-        if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
-            st.session_state[_schedule_edit_state_key(state_key)] = row_id
-            editing_row_id = row_id
-        remove_clicked = summary_cols[2].button("Remove", key=f"{state_key}_remove_{row_id}")
-        if remove_clicked:
-            if editing_row_id == row_id:
-                st.session_state[_schedule_edit_state_key(state_key)] = None
-            continue
 
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
-                col_label, col_year, col_duration, col_amount, col_rate, col_done = st.columns([1.6, 1, 1, 1.2, 1, 0.6])
+                col_label, col_year, col_duration, col_amount, col_rate = st.columns([1.6, 1, 1, 1.2, 1])
                 updated_row["name"] = col_label.text_input(
                     "Facility Label",
                     value=str(row.get("name", f"Facility {idx + 1}")),
@@ -3781,13 +4195,12 @@ def _render_loan_schedule_section() -> None:
                         format="%.3f",
                     )
                 )
-                if col_done.button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = None
-                    editing_row_id = None
 
         updated_rows.append(updated_row)
 
-    st.session_state[state_key] = updated_rows
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
     schedule_rows: List[Dict[str, object]] = []
     for facility in st.session_state[state_key]:
@@ -3825,8 +4238,8 @@ def _render_loan_schedule_section() -> None:
 
 def _render_tax_schedule_section() -> None:
     state_key = "tax_schedule"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(TAX_SCHEDULE_DEFAULTS)
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(TAX_SCHEDULE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
     if "tax_base_rate" not in st.session_state:
         st.session_state["tax_base_rate"] = 0.25
     if "tax_timing_adjustment" not in st.session_state:
@@ -3851,132 +4264,241 @@ def _render_tax_schedule_section() -> None:
         format="%.3f",
     )
 
-    rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
     start_year, _ = _projection_year_bounds()
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
 
+    action_cols = st.columns([0.9, 1.4, 1, 1, 3.1, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
+    increment_key = _schedule_increment_state_key(state_key)
+    st.session_state.setdefault(increment_key, 0.0)
+    increment_percent = action_cols[1].number_input(
+        "Annual Increment (%)",
+        key=increment_key,
+        min_value=-100.0,
+        step=0.5,
+        format="%.2f",
+        help="Cascade tax rates year over year from the first tax row.",
+        disabled=not edit_mode,
+    )
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
+            ("tax_rate",),
+            float(increment_percent),
+            year_field="year",
+            minimum=0.0,
+            maximums={"tax_rate": 1.0},
+        )
+        _set_schedule_editor_rows(state_key, rows)
+
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        next_year = _next_projection_year_for_rows(rows, year_options, start_year)
+        new_row = {
+            "id": uuid.uuid4().hex,
+            "name": f"Tax {len(rows) + 1}",
+            "year": next_year,
+            "tax_rate": st.session_state["tax_base_rate"],
+        }
+        rows.append(new_row)
+        _set_schedule_editor_rows(state_key, rows)
+        editing_row_id = str(new_row["id"])
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('name', 'Tax')).strip() or 'Tax'} | "
+            f"Year {int(row.get('year', year_options[0]))} | "
+            f"Rate {float(row.get('tax_rate', 0.0)):.3f}"
+        )
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[4].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[4].caption("Edit row")
+        editing_row_id = ""
+
+    if action_cols[5].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
+    updated_rows: List[Dict[str, object]] = []
     for idx, row in enumerate(rows):
-        with st.container(border=True):
-            col_label, col_year, col_rate, col_remove = st.columns([1.4, 1, 1, 0.6])
-            label = col_label.text_input(
-                "Tax label",
-                value=str(row.get("name", f"Tax {idx + 1}")),
-                key=f"{state_key}_label_{idx}",
-            )
-            current_year = int(row.get("year", year_options[0]))
-            if current_year not in year_options:
-                current_year = year_options[0]
-            year = col_year.selectbox(
-                "Year",
-                options=year_options,
-                index=year_options.index(current_year),
-                key=f"{state_key}_year_{idx}",
-            )
-            tax_rate = col_rate.number_input(
-                "Tax rate",
-                value=float(row.get("tax_rate", st.session_state["tax_base_rate"])),
-                key=f"{state_key}_rate_{idx}",
-                min_value=0.0,
-                max_value=1.0,
-                step=0.005,
-                format="%.3f",
-            )
-            remove_clicked = col_remove.button("Remove", key=f"{state_key}_remove_{idx}")
-        if remove_clicked:
-            continue
-        updated_rows.append({"name": label, "year": int(year), "tax_rate": float(tax_rate)})
+        row_id = str(row.get("id"))
+        st.markdown(f"**{option_labels.get(row_id, row_id)}**")
+        updated_row = copy.deepcopy(row)
+        if edit_mode and editing_row_id == row_id:
+            with st.container(border=True):
+                col_label, col_year, col_rate = st.columns([1.4, 1, 1])
+                updated_row["name"] = col_label.text_input(
+                    "Tax label",
+                    value=str(row.get("name", f"Tax {idx + 1}")),
+                    key=f"{state_key}_label_{row_id}",
+                )
+                current_year = int(row.get("year", year_options[0]))
+                if current_year not in year_options:
+                    current_year = year_options[0]
+                updated_row["year"] = col_year.selectbox(
+                    "Year",
+                    options=year_options,
+                    index=year_options.index(current_year),
+                    key=f"{state_key}_year_{row_id}",
+                )
+                updated_row["tax_rate"] = col_rate.number_input(
+                    "Tax rate",
+                    value=float(row.get("tax_rate", st.session_state["tax_base_rate"])),
+                    key=f"{state_key}_rate_{row_id}",
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.005,
+                    format="%.3f",
+                )
+        updated_rows.append(updated_row)
 
-    st.session_state[state_key] = updated_rows
-
-    if st.button("Add Tax Year", key=f"{state_key}_add"):
-        next_year = (
-            max(row["year"] for row in st.session_state[state_key]) + 1
-            if st.session_state[state_key]
-            else start_year
-        )
-        if next_year > year_options[-1]:
-            next_year = year_options[-1]
-        st.session_state[state_key].append(
-            {
-                "name": f"Tax {len(st.session_state[state_key]) + 1}",
-                "year": next_year,
-                "tax_rate": st.session_state["tax_base_rate"],
-            }
-        )
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
     if st.session_state[state_key]:
-        tax_df = pd.DataFrame(st.session_state[state_key])
+        tax_df = pd.DataFrame(st.session_state[state_key]).drop(columns=["id"], errors="ignore")
         st.dataframe(tax_df, use_container_width=True)
 
 
 def _render_inflation_schedule_section() -> None:
     state_key = "inflation_schedule"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(INFLATION_SCHEDULE_DEFAULTS)
-    _ensure_schedule_row_ids(state_key)
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(INFLATION_SCHEDULE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
 
     st.markdown("### Inflation Schedule")
     start_year, _ = _projection_year_bounds()
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
-    action_cols = st.columns([1.4, 1, 1, 3.6])
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(
+        st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+    )
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+
+    action_cols = st.columns([0.9, 1.4, 1, 1, 3.2, 1])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = str(
+            st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else "")
+        )
+
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
-    increment_percent = action_cols[0].number_input(
+    increment_percent = action_cols[1].number_input(
         "Annual Increment (%)",
         key=increment_key,
         min_value=-100.0,
         step=0.5,
         format="%.2f",
         help="Cascade inflation rates year over year from the first row.",
+        disabled=not edit_mode,
     )
-    if action_cols[1].button("Apply Increment", key=f"{state_key}_apply_increment"):
-        st.session_state[state_key] = _apply_sequential_annual_increment(
-            st.session_state[state_key],
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
             ("rate",),
             float(increment_percent),
             year_field="year",
             minimum=0.0,
             maximums={"rate": 1.0},
         )
-    if action_cols[2].button("Add Row", key=f"{state_key}_add"):
-        template = copy.deepcopy(st.session_state[state_key][-1]) if st.session_state[state_key] else {
+        _set_schedule_editor_rows(state_key, rows)
+    if action_cols[3].button("Add Row", key=f"{state_key}_add", disabled=not edit_mode):
+        template = copy.deepcopy(rows[-1]) if rows else {
             "name": "Inflation 1",
             "rate": 0.0,
         }
         template["id"] = uuid.uuid4().hex
-        template["year"] = _next_projection_year_for_rows(st.session_state[state_key], year_options, start_year)
+        template["year"] = _next_projection_year_for_rows(rows, year_options, start_year)
         template["name"] = str(template.get("name", f"Inflation {len(st.session_state[state_key]) + 1}"))
-        st.session_state[state_key].append(template)
+        rows.append(template)
+        _set_schedule_editor_rows(state_key, rows)
         st.session_state[_schedule_edit_state_key(state_key)] = template["id"]
 
-    rows = st.session_state[state_key]
-    updated_rows: List[Dict[str, object]] = []
-    editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
-    for idx, row in enumerate(rows):
-        row_id = str(row.get("id"))
-        summary_cols = st.columns([3.8, 1.2, 1])
-        summary_cols[0].markdown(
-            f"**{str(row.get('name', f'Inflation {idx + 1}'))}**  |  Year {int(row.get('year', year_options[0]))}  |  "
+    rows = _schedule_editor_rows(state_key)
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
+    option_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('name', 'Inflation')).strip() or 'Inflation'} | "
+            f"Year {int(row.get('year', year_options[0]))} | "
             f"Rate {float(row.get('rate', 0.0)):.3f}"
         )
-        if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
-            st.session_state[_schedule_edit_state_key(state_key)] = row_id
-            editing_row_id = row_id
-        remove_clicked = summary_cols[2].button("Remove", key=f"{state_key}_remove_{row_id}")
-        if remove_clicked:
-            if editing_row_id == row_id:
-                st.session_state[_schedule_edit_state_key(state_key)] = None
-            continue
+        for row in rows
+    }
+    if row_options:
+        editing_row_id = action_cols[4].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: option_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[4].caption("Edit row")
+        editing_row_id = ""
 
+    if action_cols[5].button("Remove", key=f"{state_key}_remove_selected", disabled=not (edit_mode and bool(editing_row_id))):
+        rows = [row for row in rows if str(row.get("id")) != editing_row_id]
+        _set_schedule_editor_rows(state_key, rows)
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
+    updated_rows: List[Dict[str, object]] = []
+    for idx, row in enumerate(rows):
+        row_id = str(row.get("id"))
+        st.markdown(f"**{option_labels.get(row_id, row_id)}**")
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
-                col_label, col_year, col_rate, col_done = st.columns([1.4, 1, 1, 0.6])
+                col_label, col_year, col_rate = st.columns([1.4, 1, 1])
                 updated_row["name"] = col_label.text_input(
                     "Inflation label",
                     value=str(row.get("name", f"Inflation {idx + 1}")),
@@ -4000,12 +4522,11 @@ def _render_inflation_schedule_section() -> None:
                     step=0.005,
                     format="%.3f",
                 )
-                if col_done.button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = None
-                    editing_row_id = None
         updated_rows.append(updated_row)
 
-    st.session_state[state_key] = updated_rows
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
     if st.session_state[state_key]:
         inflation_df = pd.DataFrame(st.session_state[state_key]).drop(columns=["id"], errors="ignore")
@@ -4014,32 +4535,51 @@ def _render_inflation_schedule_section() -> None:
 
 def _render_risk_schedule_section() -> None:
     state_key = "risk_schedule"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = copy.deepcopy(RISK_SCHEDULE_DEFAULTS)
-    _ensure_schedule_row_ids(state_key)
+    _ensure_schedule_editor_state(state_key, copy.deepcopy(RISK_SCHEDULE_DEFAULTS))
+    edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
 
     st.markdown("### Risk Schedule")
     start_year, _ = _projection_year_bounds()
     year_options = _projection_year_options()
     if not year_options:
         year_options = [start_year]
-    st.session_state[state_key] = sync_annual_risk_rows(st.session_state[state_key], year_options)
-    rows = st.session_state[state_key]
+    st.session_state[_schedule_saved_state_key(state_key)] = sync_annual_risk_rows(
+        st.session_state[_schedule_saved_state_key(state_key)],
+        year_options,
+    )
+    if edit_mode:
+        st.session_state[_schedule_work_state_key(state_key)] = sync_annual_risk_rows(
+            st.session_state[_schedule_work_state_key(state_key)],
+            year_options,
+        )
+    else:
+        st.session_state[_schedule_work_state_key(state_key)] = copy.deepcopy(
+            st.session_state[_schedule_saved_state_key(state_key)]
+        )
+    st.session_state[state_key] = copy.deepcopy(st.session_state[_schedule_saved_state_key(state_key)])
+
+    rows = _schedule_editor_rows(state_key)
     updated_rows: List[Dict[str, object]] = []
-    action_cols = st.columns([1.3, 1.1, 3.8])
+    action_cols = st.columns([0.9, 1.3, 1.1, 3.8])
+    if action_cols[0].button("Edit", key=f"{state_key}_toggle_editor"):
+        _toggle_schedule_editor(state_key)
+        edit_mode = bool(st.session_state.get(_schedule_editor_open_state_key(state_key), False))
+        rows = _schedule_editor_rows(state_key)
+
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
-    increment_percent = action_cols[0].number_input(
+    increment_percent = action_cols[1].number_input(
         "Annual Increment (%)",
         key=increment_key,
         min_value=-100.0,
         step=0.5,
         format="%.2f",
         help="Cascade risk scores year over year from the first row.",
+        disabled=not edit_mode,
     )
-    if action_cols[1].button("Apply Increment", key=f"{state_key}_apply_increment"):
-        st.session_state[state_key] = _apply_sequential_annual_increment(
-            st.session_state[state_key],
+    if action_cols[2].button("Apply Increment", key=f"{state_key}_apply_increment", disabled=not edit_mode):
+        rows = _apply_sequential_annual_increment(
+            rows,
             ("inherent_risk", "climate_risk", "political_risk"),
             float(increment_percent),
             year_field="year",
@@ -4050,7 +4590,8 @@ def _render_risk_schedule_section() -> None:
                 "political_risk": 1.0,
             },
         )
-    rows = st.session_state[state_key]
+        _set_schedule_editor_rows(state_key, rows)
+    rows = _schedule_editor_rows(state_key)
     row_options = [str(row.get("id")) for row in rows]
     editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
     if row_options and editing_row_id not in row_options:
@@ -4067,12 +4608,13 @@ def _render_risk_schedule_section() -> None:
         for row in rows
     }
     if row_options:
-        editing_row_id = action_cols[2].selectbox(
+        editing_row_id = action_cols[3].selectbox(
             "Edit row",
             options=row_options,
             index=row_options.index(editing_row_id),
             format_func=lambda row_id: option_labels.get(row_id, row_id),
             key=f"{state_key}_edit_selector",
+            disabled=not edit_mode,
         )
         st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
     else:
@@ -4080,19 +4622,17 @@ def _render_risk_schedule_section() -> None:
 
     st.caption("One row is maintained for every year in the selected project horizon.")
 
-    rows = st.session_state[state_key]
+    rows = _schedule_editor_rows(state_key)
     for idx, row in enumerate(rows):
         row_id = str(row.get("id"))
         updated_row = copy.deepcopy(row)
-        if editing_row_id == row_id:
+        if edit_mode and editing_row_id == row_id:
             with st.container(border=True):
                 st.markdown(
                     f"**Editing:** {str(row.get('name', f'Risk {idx + 1}'))} | "
                     f"Year {int(row.get('year', year_options[0]))}"
                 )
-                col_label, col_year, col_inherent, col_climate, col_political, col_done = st.columns(
-                    [1.5, 1, 1, 1, 1, 0.8]
-                )
+                col_label, col_year, col_inherent, col_climate, col_political = st.columns([1.5, 1, 1, 1, 1])
                 updated_row["name"] = col_label.text_input(
                     "Risk label",
                     value=str(row.get("name", f"Risk {idx + 1}")),
@@ -4136,13 +4676,11 @@ def _render_risk_schedule_section() -> None:
                     step=0.005,
                     format="%.3f",
                 )
-
-                if col_done.button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = row_id
-
         updated_rows.append(updated_row)
 
-    st.session_state[state_key] = updated_rows
+    if edit_mode:
+        _set_schedule_editor_rows(state_key, updated_rows)
+    _render_schedule_editor_footer(state_key)
 
     if st.session_state[state_key]:
         risk_df = pd.DataFrame(st.session_state[state_key]).drop(columns=["id"], errors="ignore")
