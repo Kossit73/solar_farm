@@ -2028,6 +2028,22 @@ GOAL_SEEK_STATE_KEY = "goal_seek_config"
 GOAL_SEEK_MULTIPLIERS = tuple(float(x) for x in np.linspace(0.5, 1.5, 41))
 
 
+MONTH_NAME_OPTIONS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
+
+
 MONTHLY_GENERATION_DEFAULTS = [
     {"month": "January", "expected_mwh": 635.1},
     {"month": "February", "expected_mwh": 635.1},
@@ -2634,9 +2650,14 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
     if state_key not in st.session_state:
         st.session_state[state_key] = copy.deepcopy(MONTHLY_GENERATION_DEFAULTS)
     _ensure_schedule_row_ids(state_key)
+    rows = st.session_state[state_key]
+    row_options = [str(row.get("id")) for row in rows]
+    editing_row_id = str(st.session_state.get(_schedule_edit_state_key(state_key), row_options[0] if row_options else ""))
+    if row_options and editing_row_id not in row_options:
+        editing_row_id = row_options[0]
 
     st.markdown("### Expected Monthly Production (MWh)")
-    action_cols = st.columns([1.4, 1, 1, 3.6])
+    action_cols = st.columns([1.4, 1, 2.8, 1, 1.2])
     increment_key = _schedule_increment_state_key(state_key)
     st.session_state.setdefault(increment_key, 0.0)
     increment_percent = action_cols[0].number_input(
@@ -2654,8 +2675,47 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
             float(increment_percent),
             minimum=0.0,
         )
-    if action_cols[2].button("Add Row", key=f"{state_key}_add"):
-        default_month = f"Month {len(st.session_state[state_key]) + 1}"
+        rows = st.session_state[state_key]
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = editing_row_id if editing_row_id in row_options else (row_options[0] if row_options else "")
+
+    row_labels = {
+        str(row.get("id")): (
+            f"{str(row.get('month', '')).strip() or 'Month'} | "
+            f"{float(row.get('expected_mwh', 0.0)):,.2f} MWh"
+        )
+        for row in rows
+    }
+
+    if row_options:
+        editing_row_id = action_cols[2].selectbox(
+            "Edit row",
+            options=row_options,
+            index=row_options.index(editing_row_id),
+            format_func=lambda row_id: row_labels.get(row_id, row_id),
+            key=f"{state_key}_edit_selector",
+        )
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
+    else:
+        action_cols[2].caption("Edit row")
+        editing_row_id = ""
+
+    if action_cols[3].button("Remove", key=f"{state_key}_remove_selected", disabled=not bool(editing_row_id)):
+        st.session_state[state_key] = [row for row in st.session_state[state_key] if str(row.get("id")) != editing_row_id]
+        rows = st.session_state[state_key]
+        row_options = [str(row.get("id")) for row in rows]
+        editing_row_id = row_options[0] if row_options else ""
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id or None
+
+    if action_cols[4].button("Add Row", key=f"{state_key}_add"):
+        used_months = {
+            str(row.get("month", "")).strip()
+            for row in st.session_state[state_key]
+        }
+        default_month = next(
+            (month_name for month_name in MONTH_NAME_OPTIONS if month_name not in used_months),
+            f"Month {len(st.session_state[state_key]) + 1}",
+        )
         st.session_state[state_key].append(
             {
                 "id": uuid.uuid4().hex,
@@ -2663,35 +2723,30 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
                 "expected_mwh": 0.0,
             }
         )
-        st.session_state[_schedule_edit_state_key(state_key)] = st.session_state[state_key][-1]["id"]
+        editing_row_id = str(st.session_state[state_key][-1]["id"])
+        st.session_state[_schedule_edit_state_key(state_key)] = editing_row_id
 
     rows = st.session_state[state_key]
     updated_rows: List[Dict[str, object]] = []
-    editing_row_id = st.session_state.get(_schedule_edit_state_key(state_key))
 
     for idx, row in enumerate(rows):
         row_id = str(row.get("id"))
-        summary_cols = st.columns([3.4, 1.2, 1])
-        summary_cols[0].markdown(
+        st.markdown(
             f"**{str(row.get('month', '')).strip() or f'Month {idx + 1}'}**  |  "
             f"{float(row.get('expected_mwh', 0.0)):,.2f} MWh"
         )
-        if summary_cols[1].button("Edit Row", key=f"{state_key}_edit_{row_id}"):
-            st.session_state[_schedule_edit_state_key(state_key)] = row_id
-            editing_row_id = row_id
-        remove_clicked = summary_cols[2].button("Remove", key=f"{state_key}_remove_{row_id}")
-        if remove_clicked:
-            if editing_row_id == row_id:
-                st.session_state[_schedule_edit_state_key(state_key)] = None
-            continue
 
         updated_row = copy.deepcopy(row)
         if editing_row_id == row_id:
             with st.container(border=True):
-                edit_cols = st.columns([3, 2, 1])
-                updated_row["month"] = edit_cols[0].text_input(
+                st.markdown(f"**Editing:** {str(row.get('month', '')).strip() or f'Month {idx + 1}'}")
+                edit_cols = st.columns([2.4, 1.6, 0.8])
+                current_month = str(row.get("month", "")).strip() or f"Month {idx + 1}"
+                month_options = list(dict.fromkeys([current_month, *MONTH_NAME_OPTIONS]))
+                updated_row["month"] = edit_cols[0].selectbox(
                     "Month",
-                    value=str(row.get("month", "")),
+                    options=month_options,
+                    index=month_options.index(current_month),
                     key=f"{state_key}_month_{row_id}",
                 )
                 updated_row["expected_mwh"] = edit_cols[1].number_input(
@@ -2702,8 +2757,8 @@ def _render_monthly_generation_table() -> List[Dict[str, object]]:
                     step=1.0,
                 )
                 if edit_cols[2].button("Done", key=f"{state_key}_done_{row_id}"):
-                    st.session_state[_schedule_edit_state_key(state_key)] = None
-                    editing_row_id = None
+                    st.session_state[_schedule_edit_state_key(state_key)] = row_id
+                    editing_row_id = row_id
 
         updated_rows.append(updated_row)
 
