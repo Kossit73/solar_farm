@@ -216,6 +216,10 @@ class EquityStructure:
     owner_ownership_share: float
     investor_funding_share: float
     owner_funding_share: float
+    investor_funding_input_type: str = "percent"
+    owner_funding_input_type: str = "percent"
+    investor_funding_amount: float = 0.0
+    owner_funding_amount: float = 0.0
 
     @staticmethod
     def _normalize_pair(investor_share: float, owner_share: float, label: str) -> tuple[float, float]:
@@ -239,6 +243,79 @@ class EquityStructure:
             self.owner_funding_share,
             "Funding",
         )
+
+    def validate_funding_input_types(self) -> None:
+        valid_types = {"percent", "amount"}
+        for sponsor_name, funding_type in (
+            ("Investor", self.investor_funding_input_type),
+            ("Owner", self.owner_funding_input_type),
+        ):
+            if funding_type not in valid_types:
+                raise ValueError(f"{sponsor_name} funding input type must be one of {sorted(valid_types)}")
+        if self.investor_funding_amount < 0 or self.owner_funding_amount < 0:
+            raise ValueError("Funding amounts cannot be negative")
+
+    def resolved_funding_contributions(self, total_equity_requirement: float) -> tuple[float, float]:
+        total_equity_requirement = max(0.0, float(total_equity_requirement))
+        if total_equity_requirement <= 0:
+            return 0.0, 0.0
+
+        self.validate_funding_input_types()
+
+        sponsor_configs = [
+            {
+                "mode": self.investor_funding_input_type,
+                "percent": max(0.0, self.investor_funding_share),
+                "amount": max(0.0, self.investor_funding_amount),
+            },
+            {
+                "mode": self.owner_funding_input_type,
+                "percent": max(0.0, self.owner_funding_share),
+                "amount": max(0.0, self.owner_funding_amount),
+            },
+        ]
+
+        contributions = [0.0, 0.0]
+        explicit_indices = [idx for idx, config in enumerate(sponsor_configs) if config["mode"] == "amount"]
+        percent_indices = [idx for idx, config in enumerate(sponsor_configs) if config["mode"] == "percent"]
+        explicit_total = sum(sponsor_configs[idx]["amount"] for idx in explicit_indices)
+
+        if explicit_indices and explicit_total >= total_equity_requirement:
+            if explicit_total <= 0:
+                investor_share, owner_share = self.normalized_ownership()
+                return (
+                    total_equity_requirement * investor_share,
+                    total_equity_requirement * owner_share,
+                )
+            scale = total_equity_requirement / explicit_total
+            for idx in explicit_indices:
+                contributions[idx] = sponsor_configs[idx]["amount"] * scale
+            return contributions[0], contributions[1]
+
+        for idx in explicit_indices:
+            contributions[idx] = sponsor_configs[idx]["amount"]
+
+        remaining_equity = max(0.0, total_equity_requirement - explicit_total)
+        if percent_indices:
+            percent_total = sum(sponsor_configs[idx]["percent"] for idx in percent_indices)
+            if percent_total <= 0:
+                equal_share = remaining_equity / len(percent_indices)
+                for idx in percent_indices:
+                    contributions[idx] = equal_share
+            else:
+                for idx in percent_indices:
+                    contributions[idx] = remaining_equity * (sponsor_configs[idx]["percent"] / percent_total)
+            return contributions[0], contributions[1]
+
+        if explicit_total <= 0:
+            investor_share, owner_share = self.normalized_ownership()
+            return (
+                total_equity_requirement * investor_share,
+                total_equity_requirement * owner_share,
+            )
+
+        scale = total_equity_requirement / explicit_total
+        return contributions[0] * scale, contributions[1] * scale
 
 
 @dataclass
@@ -270,7 +347,7 @@ class GlobalAssumptions:
         if not (0.0 <= self.discount_rate < 1.0):
             raise ValueError("discount_rate must be between 0 and 1.")
         self.equity_structure.normalized_ownership()
-        self.equity_structure.normalized_funding()
+        self.equity_structure.validate_funding_input_types()
 
 
 @dataclass

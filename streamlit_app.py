@@ -259,7 +259,7 @@ def _configure_llm_secrets() -> None:
 @st.cache_data(show_spinner=False)
 def _run_model(
     excel_bytes: bytes | None,
-    override_items: Tuple[Tuple[str, float | bool], ...],
+    override_items: Tuple[Tuple[str, float | bool | str], ...],
     monthly_generation_rows: Tuple[Tuple[str, float], ...],
     labour_rows: Tuple[Tuple[object, ...], ...],
     initial_investment_rows: Tuple[Tuple[object, ...], ...],
@@ -402,8 +402,12 @@ def _run_model(
     equity_structure = assumptions.global_assumptions.equity_structure
     equity_structure.investor_ownership_share = float(overrides["investor_ownership_share"])
     equity_structure.owner_ownership_share = float(overrides["owner_ownership_share"])
+    equity_structure.investor_funding_input_type = str(overrides.get("investor_funding_input_type", "percent"))
+    equity_structure.owner_funding_input_type = str(overrides.get("owner_funding_input_type", "percent"))
     equity_structure.investor_funding_share = float(overrides["investor_funding_share"])
     equity_structure.owner_funding_share = float(overrides["owner_funding_share"])
+    equity_structure.investor_funding_amount = max(0.0, float(overrides.get("investor_funding_amount", 0.0)))
+    equity_structure.owner_funding_amount = max(0.0, float(overrides.get("owner_funding_amount", 0.0)))
 
     inflation_rates = [
         _coerce_float(row.get("rate"))
@@ -518,6 +522,12 @@ def _format_currency(value: float) -> str:
 
 def _format_percentage(value: float) -> str:
     return f"{value * 100:.1f}%"
+
+
+def _format_equity_funding_requirement(input_type: str, percent_value: float, amount_value: float) -> str:
+    if input_type == "amount":
+        return _format_currency(amount_value)
+    return _format_percentage(percent_value)
 
 
 def _format_metric(name: str, value: float) -> str:
@@ -1665,6 +1675,7 @@ GenericTableRow = Dict[str, object]
 
 
 _TABLE_TYPE_LABELS = {"number": "Number", "percent": "Percent", "boolean": "Boolean"}
+SPONSOR_FUNDING_TYPE_LABELS = {"percent": "Percent", "amount": "Dollar Amount"}
 
 
 CORE_ASSUMPTION_DEFAULTS: List[GenericTableRow] = [
@@ -1722,41 +1733,25 @@ GLOBAL_DEFAULTS: List[GenericTableRow] = [
         "max": 1.0,
         "step": 0.01,
     },
+]
+
+
+EQUITY_SPONSOR_DEFAULTS: List[Dict[str, object]] = [
     {
-        "id": "investor_ownership_share",
-        "label": "Investor Ownership Percentage",
-        "value": 0.95,
-        "input_type": "percent",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.01,
+        "id": "investor",
+        "label": "Investor",
+        "ownership_share": 0.95,
+        "funding_input_type": "percent",
+        "funding_share": 0.95,
+        "funding_amount": 0.0,
     },
     {
-        "id": "owner_ownership_share",
-        "label": "Owner Ownership Percentage",
-        "value": 0.05,
-        "input_type": "percent",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.01,
-    },
-    {
-        "id": "investor_funding_share",
-        "label": "Investor Equity Funding Requirement",
-        "value": 0.95,
-        "input_type": "percent",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.01,
-    },
-    {
-        "id": "owner_funding_share",
-        "label": "Owner Equity Funding Requirement",
-        "value": 0.05,
-        "input_type": "percent",
-        "min": 0.0,
-        "max": 1.0,
-        "step": 0.01,
+        "id": "owner",
+        "label": "Owner",
+        "ownership_share": 0.05,
+        "funding_input_type": "percent",
+        "funding_share": 0.05,
+        "funding_amount": 0.0,
     },
 ]
 
@@ -2452,6 +2447,98 @@ def _ensure_table_state(state_key: str, defaults: List[GenericTableRow]) -> None
             row.setdefault("id", uuid.uuid4().hex)
 
 
+def _default_equity_sponsor_rows() -> List[Dict[str, object]]:
+    global_rows = st.session_state.get("global_table", [])
+    legacy_lookup = {
+        str(row.get("id")): row
+        for row in global_rows
+        if row.get("id") in {
+            "investor_ownership_share",
+            "owner_ownership_share",
+            "investor_funding_share",
+            "owner_funding_share",
+        }
+    }
+    sponsor_rows: List[Dict[str, object]] = []
+    for default_row in EQUITY_SPONSOR_DEFAULTS:
+        sponsor_id = str(default_row["id"])
+        legacy_prefix = "investor" if sponsor_id == "investor" else "owner"
+        sponsor_rows.append(
+            {
+                "id": sponsor_id,
+                "label": str(default_row["label"]),
+                "ownership_share": _coerce_float(
+                    legacy_lookup.get(f"{legacy_prefix}_ownership_share", {}).get(
+                        "value",
+                        default_row["ownership_share"],
+                    )
+                ),
+                "funding_input_type": "percent",
+                "funding_share": _coerce_float(
+                    legacy_lookup.get(f"{legacy_prefix}_funding_share", {}).get(
+                        "value",
+                        default_row["funding_share"],
+                    )
+                ),
+                "funding_amount": _coerce_float(default_row["funding_amount"]),
+            }
+        )
+    return sponsor_rows
+
+
+def _ensure_equity_sponsor_state(state_key: str = "equity_sponsor_table") -> None:
+    existing_rows = st.session_state.get(state_key)
+    if existing_rows is None:
+        st.session_state[state_key] = _default_equity_sponsor_rows()
+        return
+
+    rows_by_id = {str(row.get("id")): row for row in existing_rows if row.get("id")}
+    normalized_rows: List[Dict[str, object]] = []
+    for default_row in EQUITY_SPONSOR_DEFAULTS:
+        sponsor_id = str(default_row["id"])
+        source_row = rows_by_id.get(sponsor_id, {})
+        funding_input_type = str(
+            source_row.get("funding_input_type", default_row["funding_input_type"])
+        ).strip().lower()
+        if funding_input_type not in SPONSOR_FUNDING_TYPE_LABELS:
+            funding_input_type = str(default_row["funding_input_type"])
+        normalized_rows.append(
+            {
+                "id": sponsor_id,
+                "label": str(default_row["label"]),
+                "ownership_share": max(
+                    0.0,
+                    _coerce_float(source_row.get("ownership_share", default_row["ownership_share"])),
+                ),
+                "funding_input_type": funding_input_type,
+                "funding_share": max(
+                    0.0,
+                    _coerce_float(source_row.get("funding_share", default_row["funding_share"])),
+                ),
+                "funding_amount": max(
+                    0.0,
+                    _coerce_float(source_row.get("funding_amount", default_row["funding_amount"])),
+                ),
+            }
+        )
+    st.session_state[state_key] = normalized_rows
+
+
+def _strip_legacy_equity_rows_from_global_table(state_key: str = "global_table") -> None:
+    rows = st.session_state.get(state_key)
+    if not rows:
+        return
+    legacy_ids = {
+        "investor_ownership_share",
+        "owner_ownership_share",
+        "investor_funding_share",
+        "owner_funding_share",
+    }
+    st.session_state[state_key] = [
+        row for row in rows if str(row.get("id")) not in legacy_ids
+    ]
+
+
 def _ensure_schedule_row_ids(state_key: str) -> None:
     rows = st.session_state.get(state_key, [])
     seen_ids: set[str] = set()
@@ -2643,6 +2730,77 @@ def _render_label_value_table(title: str, state_key: str, defaults: List[Generic
                 "step": 0.1,
             }
         )
+
+
+def _render_equity_sponsor_section() -> None:
+    state_key = "equity_sponsor_table"
+    _ensure_equity_sponsor_state(state_key)
+    st.markdown("### Equity Sponsors")
+    st.caption(
+        "Set ownership economics separately from funding obligations. "
+        "Funding requirements can be entered as a share of total equity or as an explicit dollar amount."
+    )
+
+    updated_rows: List[Dict[str, object]] = []
+    for row in st.session_state[state_key]:
+        sponsor_id = str(row.get("id", "sponsor"))
+        sponsor_label = str(row.get("label", sponsor_id.title()))
+        with st.container(border=True):
+            st.markdown(f"**{sponsor_label}**")
+            col_owner, col_basis, col_funding = st.columns([1.2, 1.2, 1.6])
+            ownership_share = col_owner.number_input(
+                "Ownership Percentage",
+                value=float(row.get("ownership_share", 0.0)),
+                key=f"{state_key}_ownership_{sponsor_id}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                format="%.4f",
+            )
+            funding_input_type = col_basis.selectbox(
+                "Funding Requirement Basis",
+                options=list(SPONSOR_FUNDING_TYPE_LABELS.keys()),
+                index=list(SPONSOR_FUNDING_TYPE_LABELS.keys()).index(
+                    str(row.get("funding_input_type", "percent"))
+                    if str(row.get("funding_input_type", "percent")) in SPONSOR_FUNDING_TYPE_LABELS
+                    else "percent"
+                ),
+                key=f"{state_key}_basis_{sponsor_id}",
+                format_func=lambda option: SPONSOR_FUNDING_TYPE_LABELS[option],
+            )
+            if funding_input_type == "amount":
+                funding_amount = col_funding.number_input(
+                    "Equity Funding Requirement ($)",
+                    value=float(row.get("funding_amount", 0.0)),
+                    key=f"{state_key}_funding_amount_{sponsor_id}",
+                    min_value=0.0,
+                    step=1000.0,
+                    format="%.2f",
+                )
+                funding_share = float(row.get("funding_share", 0.0))
+            else:
+                funding_share = col_funding.number_input(
+                    "Equity Funding Requirement (%)",
+                    value=float(row.get("funding_share", 0.0)),
+                    key=f"{state_key}_funding_share_{sponsor_id}",
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.4f",
+                )
+                funding_amount = float(row.get("funding_amount", 0.0))
+
+            updated_rows.append(
+                {
+                    "id": sponsor_id,
+                    "label": sponsor_label,
+                    "ownership_share": ownership_share,
+                    "funding_input_type": funding_input_type,
+                    "funding_share": funding_share,
+                    "funding_amount": funding_amount,
+                }
+            )
+
+    st.session_state[state_key] = updated_rows
 
 
 def _render_monthly_generation_table() -> List[Dict[str, object]]:
@@ -4029,7 +4187,10 @@ def _render_assumption_controls() -> tuple[
 
     start_year, end_year = _render_projection_horizon_section()
     _render_label_value_table("Core Assumptions", "core_table", CORE_ASSUMPTION_DEFAULTS)
+    _ensure_equity_sponsor_state()
+    _strip_legacy_equity_rows_from_global_table()
     _render_label_value_table("Global", "global_table", GLOBAL_DEFAULTS)
+    _render_equity_sponsor_section()
     _render_label_value_table("Energy", "energy_table", ENERGY_COMMON_DEFAULTS)
     energy_input_mode = _render_energy_input_mode_selector()
     if energy_input_mode == "capacity_factor":
@@ -4070,6 +4231,13 @@ def _render_assumption_controls() -> tuple[
     solar_panels_amount = _solar_panels_amount(initial_investment_rows)
     panel_unit_cost_input = float(st.session_state.get("panel_unit_cost_input", PANEL_UNIT_COST_DEFAULT))
     derived_panel_count = _derived_panel_count(solar_panels_amount, panel_unit_cost_input)
+    _ensure_equity_sponsor_state()
+    sponsor_rows = {
+        str(row.get("id")): row
+        for row in st.session_state.get("equity_sponsor_table", [])
+    }
+    investor_row = sponsor_rows.get("investor", EQUITY_SPONSOR_DEFAULTS[0])
+    owner_row = sponsor_rows.get("owner", EQUITY_SPONSOR_DEFAULTS[1])
 
     overrides: Dict[str, float | bool | str] = {
         "discount_rate": float(_get_row_value("core_table", "discount_rate", 0.10, float)),
@@ -4081,18 +4249,14 @@ def _render_assumption_controls() -> tuple[
         "capital_gains_tax_rate": float(
             _get_row_value("global_table", "capital_gains_tax_rate", 0.10, float)
         ),
-        "investor_ownership_share": float(
-            _get_row_value("global_table", "investor_ownership_share", 0.95, float)
-        ),
-        "owner_ownership_share": float(
-            _get_row_value("global_table", "owner_ownership_share", 0.05, float)
-        ),
-        "investor_funding_share": float(
-            _get_row_value("global_table", "investor_funding_share", 0.95, float)
-        ),
-        "owner_funding_share": float(
-            _get_row_value("global_table", "owner_funding_share", 0.05, float)
-        ),
+        "investor_ownership_share": float(investor_row.get("ownership_share", 0.95)),
+        "owner_ownership_share": float(owner_row.get("ownership_share", 0.05)),
+        "investor_funding_input_type": str(investor_row.get("funding_input_type", "percent")),
+        "owner_funding_input_type": str(owner_row.get("funding_input_type", "percent")),
+        "investor_funding_share": float(investor_row.get("funding_share", 0.95)),
+        "owner_funding_share": float(owner_row.get("funding_share", 0.05)),
+        "investor_funding_amount": float(investor_row.get("funding_amount", 0.0)),
+        "owner_funding_amount": float(owner_row.get("funding_amount", 0.0)),
         "capacity_mw": float(_get_row_value("energy_table", "capacity_mw", 10.0, float)),
         "capacity_factor": float(
             _get_row_value("energy_capacity_factor_table", "capacity_factor", 0.145, float)
@@ -4184,7 +4348,8 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
     st.info(
         "Use the editable tables above to update assumptions. "
         "Summary snapshots now live on the Key Metrics Dashboard tab. "
-        "Ownership percentages drive distributions, while equity funding requirements drive sponsor cash calls."
+        "Ownership percentages drive distributions, while equity funding requirements drive sponsor cash calls "
+        "using either percentage-based or explicit dollar inputs."
     )
 
 
@@ -4260,11 +4425,19 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
     with global_col3:
         st.metric(
             "Investor Funding Requirement",
-            _format_percentage(global_cfg.equity_structure.investor_funding_share),
+            _format_equity_funding_requirement(
+                global_cfg.equity_structure.investor_funding_input_type,
+                global_cfg.equity_structure.investor_funding_share,
+                global_cfg.equity_structure.investor_funding_amount,
+            ),
         )
         st.metric(
             "Owner Funding Requirement",
-            _format_percentage(global_cfg.equity_structure.owner_funding_share),
+            _format_equity_funding_requirement(
+                global_cfg.equity_structure.owner_funding_input_type,
+                global_cfg.equity_structure.owner_funding_share,
+                global_cfg.equity_structure.owner_funding_amount,
+            ),
         )
     extra_global_col1, extra_global_col2 = st.columns(2)
     with extra_global_col1:

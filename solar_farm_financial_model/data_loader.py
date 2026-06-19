@@ -59,6 +59,10 @@ def _default_assumptions() -> Assumptions:
         owner_ownership_share=0.05,
         investor_funding_share=0.95,
         owner_funding_share=0.05,
+        investor_funding_input_type="percent",
+        owner_funding_input_type="percent",
+        investor_funding_amount=0.0,
+        owner_funding_amount=0.0,
     )
 
     global_assumptions = GlobalAssumptions(
@@ -250,6 +254,14 @@ def _parse_global_assumptions(workbook: pd.ExcelFile) -> GlobalAssumptions:
         owner_funding_share=float(
             mapping.get("Owner Equity Funding Requirement", owner_ownership_share)
         ),
+        investor_funding_input_type=str(
+            mapping.get("Investor Equity Funding Requirement Basis", "percent")
+        ).strip().lower(),
+        owner_funding_input_type=str(
+            mapping.get("Owner Equity Funding Requirement Basis", "percent")
+        ).strip().lower(),
+        investor_funding_amount=float(mapping.get("Investor Equity Funding Requirement Amount", 0.0)),
+        owner_funding_amount=float(mapping.get("Owner Equity Funding Requirement Amount", 0.0)),
     )
 
     return GlobalAssumptions(

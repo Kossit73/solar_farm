@@ -137,6 +137,39 @@ def test_equity_contribution_covers_operating_deficit_without_capex() -> None:
     assert monthly["owner_cash_flow"] == pytest.approx(-monthly["owner_equity_contribution"])
 
 
+def test_mixed_equity_funding_inputs_allocate_amount_then_residual_percent() -> None:
+    assumptions = load_assumptions()
+    assumptions.global_assumptions.forecast_months = 12
+    assumptions.global_assumptions.include_terminal_value = False
+    assumptions.global_assumptions.tax.income_tax_rate = 0.0
+    assumptions.global_assumptions.equity_structure.investor_ownership_share = 0.50
+    assumptions.global_assumptions.equity_structure.owner_ownership_share = 0.50
+    assumptions.global_assumptions.equity_structure.investor_funding_input_type = "amount"
+    assumptions.global_assumptions.equity_structure.owner_funding_input_type = "percent"
+    assumptions.global_assumptions.equity_structure.investor_funding_amount = 7_000.0
+    assumptions.global_assumptions.equity_structure.owner_funding_share = 1.0
+    assumptions.energy.capacity_mw = 0.0
+    assumptions.energy.capacity_factor = 0.0
+    assumptions.energy.panel_count = 0.0
+    assumptions.capex_items = ()
+    assumptions.debt_facilities = ()
+    assumptions.fixed_opex = (FixedOpexItem(name="Operations", annual_cost=180_000.0),)
+    assumptions.variable_opex = ()
+    assumptions.revenue.ppa.share_of_output = 1.0
+    assumptions.revenue.merchant.share_of_output = 0.0
+    assumptions.revenue.ppa.rate_curve.initial = 0.0
+    assumptions.revenue.merchant.rate_curve.initial = 0.0
+    assumptions.revenue.rec.initial = 0.0
+
+    monthly = SolarFarmFinancialModel(assumptions).run().monthly_results.iloc[0]
+
+    assert monthly["equity_contribution"] > 7_000.0
+    assert monthly["investor_equity_contribution"] == pytest.approx(7_000.0)
+    assert monthly["owner_equity_contribution"] == pytest.approx(
+        monthly["equity_contribution"] - 7_000.0
+    )
+
+
 def test_equity_distributions_follow_ownership_not_funding() -> None:
     assumptions = load_assumptions()
     assumptions.global_assumptions.forecast_months = 12

@@ -224,11 +224,11 @@ class SolarFarmFinancialModel:
 
         equity_structure = self.assumptions.global_assumptions.equity_structure
         investor_ownership_share, owner_ownership_share = equity_structure.normalized_ownership()
-        investor_funding_share, owner_funding_share = equity_structure.normalized_funding()
-        monthly["investor_equity_contribution"] = (
-            monthly["equity_contribution"] * investor_funding_share
+        funding_allocations = monthly["equity_contribution"].apply(
+            lambda value: equity_structure.resolved_funding_contributions(value)
         )
-        monthly["owner_equity_contribution"] = monthly["equity_contribution"] * owner_funding_share
+        monthly["investor_equity_contribution"] = funding_allocations.apply(lambda value: value[0])
+        monthly["owner_equity_contribution"] = funding_allocations.apply(lambda value: value[1])
         monthly["investor_equity_distribution"] = (
             monthly["equity_distribution"] * investor_ownership_share
         )

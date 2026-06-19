@@ -358,7 +358,6 @@ def _build_global_assumptions_table(assumptions: Assumptions) -> pd.DataFrame:
     global_cfg = assumptions.global_assumptions
     equity_structure = global_cfg.equity_structure
     investor_ownership_share, owner_ownership_share = equity_structure.normalized_ownership()
-    investor_funding_share, owner_funding_share = equity_structure.normalized_funding()
     return _parameter_table(
         [
             ("Project Name", global_cfg.project_name),
@@ -371,8 +370,12 @@ def _build_global_assumptions_table(assumptions: Assumptions) -> pd.DataFrame:
             ("Capital Gains Tax Rate", global_cfg.tax.capital_gains_tax_rate),
             ("Investor Ownership Share", investor_ownership_share),
             ("Owner Ownership Share", owner_ownership_share),
-            ("Investor Equity Funding Requirement", investor_funding_share),
-            ("Owner Equity Funding Requirement", owner_funding_share),
+            ("Investor Funding Basis", equity_structure.investor_funding_input_type),
+            ("Investor Equity Funding Requirement (%)", equity_structure.investor_funding_share),
+            ("Investor Equity Funding Requirement ($)", equity_structure.investor_funding_amount),
+            ("Owner Funding Basis", equity_structure.owner_funding_input_type),
+            ("Owner Equity Funding Requirement (%)", equity_structure.owner_funding_share),
+            ("Owner Equity Funding Requirement ($)", equity_structure.owner_funding_amount),
             ("Terminal Growth Rate", assumptions.terminal_growth_rate),
         ]
     )
