@@ -15,8 +15,8 @@ from .schemas import (
     Assumptions,
     CapexItem,
     DebtFacility,
-    DistributionSplit,
     EnergyAssumptions,
+    EquityStructure,
     FixedOpexItem,
     GlobalAssumptions,
     InventoryPayableSettings,
@@ -54,7 +54,12 @@ def _default_assumptions() -> Assumptions:
     """Return a curated set of assumptions derived from the provided workbook."""
 
     tax = TaxAssumptions(income_tax_rate=0.25, capital_gains_tax_rate=0.10)
-    distribution = DistributionSplit(investor_share=0.95, owner_share=0.05)
+    equity_structure = EquityStructure(
+        investor_ownership_share=0.95,
+        owner_ownership_share=0.05,
+        investor_funding_share=0.95,
+        owner_funding_share=0.05,
+    )
 
     global_assumptions = GlobalAssumptions(
         project_name="Solar Numquants Ltd",
@@ -64,7 +69,7 @@ def _default_assumptions() -> Assumptions:
         exit_multiple=5.0,
         discount_rate=0.10,
         tax=tax,
-        distribution=distribution,
+        equity_structure=equity_structure,
     )
 
     energy = EnergyAssumptions(
@@ -234,9 +239,17 @@ def _parse_global_assumptions(workbook: pd.ExcelFile) -> GlobalAssumptions:
         income_tax_rate=float(mapping.get("Income Tax Rate", 0.25)),
         capital_gains_tax_rate=float(mapping.get("Long-Term Capital Gains Tax Rate", 0.10)),
     )
-    distribution = DistributionSplit(
-        investor_share=float(mapping.get("% Share for Investors", 0.95)),
-        owner_share=float(mapping.get("Remaining % for Owners", 0.05)),
+    investor_ownership_share = float(mapping.get("% Share for Investors", 0.95))
+    owner_ownership_share = float(mapping.get("Remaining % for Owners", 0.05))
+    equity_structure = EquityStructure(
+        investor_ownership_share=investor_ownership_share,
+        owner_ownership_share=owner_ownership_share,
+        investor_funding_share=float(
+            mapping.get("Investor Equity Funding Requirement", investor_ownership_share)
+        ),
+        owner_funding_share=float(
+            mapping.get("Owner Equity Funding Requirement", owner_ownership_share)
+        ),
     )
 
     return GlobalAssumptions(
@@ -247,7 +260,7 @@ def _parse_global_assumptions(workbook: pd.ExcelFile) -> GlobalAssumptions:
         exit_multiple=exit_multiple,
         discount_rate=discount_rate,
         tax=tax,
-        distribution=distribution,
+        equity_structure=equity_structure,
     )
 
 

@@ -218,24 +218,45 @@ class SolarFarmFinancialModel:
         cash_sweep_pct = max(0.0, min(1.0, float(getattr(self.assumptions, "cash_sweep_pct", 0.0))))
         monthly["cash_sweep"] = monthly["cash_after_reserves"].clip(lower=0) * cash_sweep_pct
         monthly["cash_after_sweep"] = monthly["cash_after_reserves"] - monthly["cash_sweep"]
-        monthly["equity_contribution"] = (monthly["capex"] - monthly["debt_draw"]).clip(lower=0)
+        monthly["equity_contribution"] = (-monthly["cash_after_sweep"]).clip(lower=0)
         monthly["equity_distribution"] = monthly["cash_after_sweep"].clip(lower=0)
         monthly["equity_cash_flow"] = -monthly["equity_contribution"] + monthly["equity_distribution"]
 
-        distribution = self.assumptions.global_assumptions.distribution.normalized()
-        monthly["investor_cash_flow"] = monthly["equity_cash_flow"] * distribution.investor_share
-        monthly["owner_cash_flow"] = monthly["equity_cash_flow"] * distribution.owner_share
+        equity_structure = self.assumptions.global_assumptions.equity_structure
+        investor_ownership_share, owner_ownership_share = equity_structure.normalized_ownership()
+        investor_funding_share, owner_funding_share = equity_structure.normalized_funding()
+        monthly["investor_equity_contribution"] = (
+            monthly["equity_contribution"] * investor_funding_share
+        )
+        monthly["owner_equity_contribution"] = monthly["equity_contribution"] * owner_funding_share
+        monthly["investor_equity_distribution"] = (
+            monthly["equity_distribution"] * investor_ownership_share
+        )
+        monthly["owner_equity_distribution"] = monthly["equity_distribution"] * owner_ownership_share
+        monthly["investor_cash_flow"] = (
+            -monthly["investor_equity_contribution"] + monthly["investor_equity_distribution"]
+        )
+        monthly["owner_cash_flow"] = (
+            -monthly["owner_equity_contribution"] + monthly["owner_equity_distribution"]
+        )
         monthly = monthly.join(self._compute_risk_schedule())
 
         terminal_cash = self._compute_terminal_value(monthly)
         if terminal_cash is not None:
             monthly.iloc[-1, monthly.columns.get_loc("fcff")] += terminal_cash["fcff"]
             monthly.iloc[-1, monthly.columns.get_loc("equity_cash_flow")] += terminal_cash["equity"]
+            monthly.iloc[-1, monthly.columns.get_loc("equity_distribution")] += terminal_cash["equity"]
+            monthly.iloc[-1, monthly.columns.get_loc("investor_equity_distribution")] += (
+                terminal_cash["equity"] * investor_ownership_share
+            )
+            monthly.iloc[-1, monthly.columns.get_loc("owner_equity_distribution")] += (
+                terminal_cash["equity"] * owner_ownership_share
+            )
             monthly.iloc[-1, monthly.columns.get_loc("investor_cash_flow")] += (
-                terminal_cash["equity"] * distribution.investor_share
+                terminal_cash["equity"] * investor_ownership_share
             )
             monthly.iloc[-1, monthly.columns.get_loc("owner_cash_flow")] += (
-                terminal_cash["equity"] * distribution.owner_share
+                terminal_cash["equity"] * owner_ownership_share
             )
 
         monthly = self._apply_risk_discounting(monthly)
@@ -722,7 +743,11 @@ class SolarFarmFinancialModel:
                 "itc_benefit": "sum",
                 "arrangement_fees": "sum",
                 "equity_contribution": "sum",
+                "investor_equity_contribution": "sum",
+                "owner_equity_contribution": "sum",
                 "equity_distribution": "sum",
+                "investor_equity_distribution": "sum",
+                "owner_equity_distribution": "sum",
                 "dsra_change": "sum",
                 "major_maintenance_reserve_deposit": "sum",
                 "inverter_reserve_deposit": "sum",

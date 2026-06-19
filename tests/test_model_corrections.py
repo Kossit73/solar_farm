@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 from openpyxl import Workbook
 
 from solar_farm_financial_model.data_loader import load_assumptions
@@ -12,7 +13,7 @@ from solar_farm_financial_model.input_parsing import (
 )
 import solar_farm_financial_model.model as model_module
 from solar_farm_financial_model.model import SolarFarmFinancialModel, capex_item_schedule
-from solar_farm_financial_model.schemas import EnergyAssumptions, TaxRateSchedule
+from solar_farm_financial_model.schemas import EnergyAssumptions, FixedOpexItem, TaxRateSchedule
 
 
 def test_build_opex_items_maps_fixed_cost_to_annual_cost() -> None:
@@ -97,6 +98,81 @@ def test_zero_irr_and_payback_are_preserved(monkeypatch) -> None:
     assert metrics["investor_irr"] == 0.0
     assert metrics["owner_irr"] == 0.0
     assert metrics["project_payback_months"] == 0
+
+
+def test_equity_contribution_covers_operating_deficit_without_capex() -> None:
+    assumptions = load_assumptions()
+    assumptions.global_assumptions.forecast_months = 12
+    assumptions.global_assumptions.include_terminal_value = False
+    assumptions.global_assumptions.tax.income_tax_rate = 0.0
+    assumptions.global_assumptions.equity_structure.investor_ownership_share = 0.20
+    assumptions.global_assumptions.equity_structure.owner_ownership_share = 0.80
+    assumptions.global_assumptions.equity_structure.investor_funding_share = 0.70
+    assumptions.global_assumptions.equity_structure.owner_funding_share = 0.30
+    assumptions.energy.capacity_mw = 0.0
+    assumptions.energy.capacity_factor = 0.0
+    assumptions.energy.panel_count = 0.0
+    assumptions.capex_items = ()
+    assumptions.debt_facilities = ()
+    assumptions.fixed_opex = (FixedOpexItem(name="Operations", annual_cost=120_000.0),)
+    assumptions.variable_opex = ()
+    assumptions.revenue.ppa.share_of_output = 1.0
+    assumptions.revenue.merchant.share_of_output = 0.0
+    assumptions.revenue.ppa.rate_curve.initial = 0.0
+    assumptions.revenue.merchant.rate_curve.initial = 0.0
+    assumptions.revenue.rec.initial = 0.0
+
+    monthly = SolarFarmFinancialModel(assumptions).run().monthly_results.iloc[0]
+
+    assert monthly["capex"] == pytest.approx(0.0)
+    assert monthly["equity_contribution"] > 0.0
+    assert monthly["equity_distribution"] == pytest.approx(0.0)
+    assert monthly["investor_equity_contribution"] == pytest.approx(
+        monthly["equity_contribution"] * 0.70
+    )
+    assert monthly["owner_equity_contribution"] == pytest.approx(
+        monthly["equity_contribution"] * 0.30
+    )
+    assert monthly["investor_cash_flow"] == pytest.approx(-monthly["investor_equity_contribution"])
+    assert monthly["owner_cash_flow"] == pytest.approx(-monthly["owner_equity_contribution"])
+
+
+def test_equity_distributions_follow_ownership_not_funding() -> None:
+    assumptions = load_assumptions()
+    assumptions.global_assumptions.forecast_months = 12
+    assumptions.global_assumptions.include_terminal_value = False
+    assumptions.global_assumptions.tax.income_tax_rate = 0.0
+    assumptions.global_assumptions.equity_structure.investor_ownership_share = 0.25
+    assumptions.global_assumptions.equity_structure.owner_ownership_share = 0.75
+    assumptions.global_assumptions.equity_structure.investor_funding_share = 0.90
+    assumptions.global_assumptions.equity_structure.owner_funding_share = 0.10
+    assumptions.energy.capacity_mw = 5.0
+    assumptions.energy.capacity_factor = 0.30
+    assumptions.energy.panel_count = 0.0
+    assumptions.capex_items = ()
+    assumptions.debt_facilities = ()
+    assumptions.receivable_settings = ()
+    assumptions.inventory_settings = ()
+    assumptions.fixed_opex = ()
+    assumptions.variable_opex = ()
+    assumptions.revenue.ppa.share_of_output = 1.0
+    assumptions.revenue.merchant.share_of_output = 0.0
+    assumptions.revenue.ppa.rate_curve.initial = 300.0
+    assumptions.revenue.merchant.rate_curve.initial = 0.0
+    assumptions.revenue.rec.initial = 0.0
+
+    monthly = SolarFarmFinancialModel(assumptions).run().monthly_results.iloc[0]
+
+    assert monthly["equity_contribution"] == pytest.approx(0.0)
+    assert monthly["equity_distribution"] > 0.0
+    assert monthly["investor_equity_distribution"] == pytest.approx(
+        monthly["equity_distribution"] * 0.25
+    )
+    assert monthly["owner_equity_distribution"] == pytest.approx(
+        monthly["equity_distribution"] * 0.75
+    )
+    assert monthly["investor_cash_flow"] == pytest.approx(monthly["investor_equity_distribution"])
+    assert monthly["owner_cash_flow"] == pytest.approx(monthly["owner_equity_distribution"])
 
 
 def test_apply_energy_input_mode_resource_hours_derives_capacity_factor() -> None:

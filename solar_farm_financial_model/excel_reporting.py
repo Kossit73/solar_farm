@@ -356,7 +356,9 @@ def _build_cash_flow_view(outputs: ModelOutputs) -> pd.DataFrame:
 
 def _build_global_assumptions_table(assumptions: Assumptions) -> pd.DataFrame:
     global_cfg = assumptions.global_assumptions
-    distribution = global_cfg.distribution.normalized()
+    equity_structure = global_cfg.equity_structure
+    investor_ownership_share, owner_ownership_share = equity_structure.normalized_ownership()
+    investor_funding_share, owner_funding_share = equity_structure.normalized_funding()
     return _parameter_table(
         [
             ("Project Name", global_cfg.project_name),
@@ -367,8 +369,10 @@ def _build_global_assumptions_table(assumptions: Assumptions) -> pd.DataFrame:
             ("Discount Rate", global_cfg.discount_rate),
             ("Income Tax Rate", global_cfg.tax.income_tax_rate),
             ("Capital Gains Tax Rate", global_cfg.tax.capital_gains_tax_rate),
-            ("Investor Share", distribution.investor_share),
-            ("Owner Share", distribution.owner_share),
+            ("Investor Ownership Share", investor_ownership_share),
+            ("Owner Ownership Share", owner_ownership_share),
+            ("Investor Equity Funding Requirement", investor_funding_share),
+            ("Owner Equity Funding Requirement", owner_funding_share),
             ("Terminal Growth Rate", assumptions.terminal_growth_rate),
         ]
     )
@@ -495,7 +499,11 @@ def append_comprehensive_workbook_sheets(
         "inverter_reserve_deposit",
         "cash_sweep",
         "equity_contribution",
+        "investor_equity_contribution",
+        "owner_equity_contribution",
         "equity_distribution",
+        "investor_equity_distribution",
+        "owner_equity_distribution",
         "equity_cash_flow",
         "sources_total",
         "uses_total",

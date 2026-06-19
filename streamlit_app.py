@@ -399,8 +399,11 @@ def _run_model(
 
     assumptions.global_assumptions.tax.income_tax_rate = float(overrides["income_tax_rate"])
     assumptions.global_assumptions.tax.capital_gains_tax_rate = float(overrides["capital_gains_tax_rate"])
-    assumptions.global_assumptions.distribution.investor_share = float(overrides["investor_share"])
-    assumptions.global_assumptions.distribution.owner_share = float(overrides["owner_share"])
+    equity_structure = assumptions.global_assumptions.equity_structure
+    equity_structure.investor_ownership_share = float(overrides["investor_ownership_share"])
+    equity_structure.owner_ownership_share = float(overrides["owner_ownership_share"])
+    equity_structure.investor_funding_share = float(overrides["investor_funding_share"])
+    equity_structure.owner_funding_share = float(overrides["owner_funding_share"])
 
     inflation_rates = [
         _coerce_float(row.get("rate"))
@@ -1720,8 +1723,8 @@ GLOBAL_DEFAULTS: List[GenericTableRow] = [
         "step": 0.01,
     },
     {
-        "id": "investor_share",
-        "label": "Investor Share",
+        "id": "investor_ownership_share",
+        "label": "Investor Ownership Percentage",
         "value": 0.95,
         "input_type": "percent",
         "min": 0.0,
@@ -1729,8 +1732,26 @@ GLOBAL_DEFAULTS: List[GenericTableRow] = [
         "step": 0.01,
     },
     {
-        "id": "owner_share",
-        "label": "Owner Share",
+        "id": "owner_ownership_share",
+        "label": "Owner Ownership Percentage",
+        "value": 0.05,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
+    {
+        "id": "investor_funding_share",
+        "label": "Investor Equity Funding Requirement",
+        "value": 0.95,
+        "input_type": "percent",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+    },
+    {
+        "id": "owner_funding_share",
+        "label": "Owner Equity Funding Requirement",
         "value": 0.05,
         "input_type": "percent",
         "min": 0.0,
@@ -4005,8 +4026,18 @@ def _render_assumption_controls() -> tuple[
         "capital_gains_tax_rate": float(
             _get_row_value("global_table", "capital_gains_tax_rate", 0.10, float)
         ),
-        "investor_share": float(_get_row_value("global_table", "investor_share", 0.95, float)),
-        "owner_share": float(_get_row_value("global_table", "owner_share", 0.05, float)),
+        "investor_ownership_share": float(
+            _get_row_value("global_table", "investor_ownership_share", 0.95, float)
+        ),
+        "owner_ownership_share": float(
+            _get_row_value("global_table", "owner_ownership_share", 0.05, float)
+        ),
+        "investor_funding_share": float(
+            _get_row_value("global_table", "investor_funding_share", 0.95, float)
+        ),
+        "owner_funding_share": float(
+            _get_row_value("global_table", "owner_funding_share", 0.05, float)
+        ),
         "capacity_mw": float(_get_row_value("energy_table", "capacity_mw", 10.0, float)),
         "capacity_factor": float(
             _get_row_value("energy_capacity_factor_table", "capacity_factor", 0.145, float)
@@ -4097,7 +4128,8 @@ def _render_input_landing(assumptions: Assumptions, outputs: ModelOutputs) -> No
 
     st.info(
         "Use the editable tables above to update assumptions. "
-        "Summary snapshots now live on the Key Metrics Dashboard tab."
+        "Summary snapshots now live on the Key Metrics Dashboard tab. "
+        "Ownership percentages drive distributions, while equity funding requirements drive sponsor cash calls."
     )
 
 
@@ -4162,10 +4194,27 @@ def _render_assumption_snapshot(assumptions: Assumptions, outputs: ModelOutputs)
         st.metric("Income Tax Rate", _format_percentage(global_cfg.tax.income_tax_rate))
         st.metric("Capital Gains Tax", _format_percentage(global_cfg.tax.capital_gains_tax_rate))
     with global_col2:
-        st.metric("Investor Share", _format_percentage(global_cfg.distribution.investor_share))
-        st.metric("Owner Share", _format_percentage(global_cfg.distribution.owner_share))
+        st.metric(
+            "Investor Ownership",
+            _format_percentage(global_cfg.equity_structure.investor_ownership_share),
+        )
+        st.metric(
+            "Owner Ownership",
+            _format_percentage(global_cfg.equity_structure.owner_ownership_share),
+        )
     with global_col3:
+        st.metric(
+            "Investor Funding Requirement",
+            _format_percentage(global_cfg.equity_structure.investor_funding_share),
+        )
+        st.metric(
+            "Owner Funding Requirement",
+            _format_percentage(global_cfg.equity_structure.owner_funding_share),
+        )
+    extra_global_col1, extra_global_col2 = st.columns(2)
+    with extra_global_col1:
         st.metric("Terminal Growth", _format_percentage(assumptions.terminal_growth_rate))
+    with extra_global_col2:
         st.metric(
             "Payback",
             _format_metric(

@@ -209,19 +209,35 @@ class RiskScheduleEntry:
 
 
 @dataclass
-class DistributionSplit:
-    """Equity ownership split between investor and owner."""
+class EquityStructure:
+    """Ownership and funding splits across the project's equity sponsors."""
 
-    investor_share: float
-    owner_share: float
+    investor_ownership_share: float
+    owner_ownership_share: float
+    investor_funding_share: float
+    owner_funding_share: float
 
-    def normalized(self) -> "DistributionSplit":
-        total = self.investor_share + self.owner_share
+    @staticmethod
+    def _normalize_pair(investor_share: float, owner_share: float, label: str) -> tuple[float, float]:
+        if investor_share < 0 or owner_share < 0:
+            raise ValueError(f"{label} shares cannot be negative")
+        total = investor_share + owner_share
         if total == 0:
-            raise ValueError("Distribution split cannot be zero")
-        return DistributionSplit(
-            investor_share=self.investor_share / total,
-            owner_share=self.owner_share / total,
+            raise ValueError(f"{label} split cannot be zero")
+        return investor_share / total, owner_share / total
+
+    def normalized_ownership(self) -> tuple[float, float]:
+        return self._normalize_pair(
+            self.investor_ownership_share,
+            self.owner_ownership_share,
+            "Ownership",
+        )
+
+    def normalized_funding(self) -> tuple[float, float]:
+        return self._normalize_pair(
+            self.investor_funding_share,
+            self.owner_funding_share,
+            "Funding",
         )
 
 
@@ -244,7 +260,7 @@ class GlobalAssumptions:
     exit_multiple: float
     discount_rate: float
     tax: TaxAssumptions
-    distribution: DistributionSplit
+    equity_structure: EquityStructure
 
     def validate(self) -> None:
         if self.forecast_months <= 0:
@@ -253,6 +269,8 @@ class GlobalAssumptions:
             raise ValueError("exit_multiple cannot be negative.")
         if not (0.0 <= self.discount_rate < 1.0):
             raise ValueError("discount_rate must be between 0 and 1.")
+        self.equity_structure.normalized_ownership()
+        self.equity_structure.normalized_funding()
 
 
 @dataclass
