@@ -1878,7 +1878,7 @@ def _render_model_hero() -> None:
         f"""
         <section class="designer-hero">
             <p class="designer-kicker">Infrastructure finance planning</p>
-            <h1 class="designer-title">Solar Farm Financial Model</h1>
+            <h1 class="designer-title">Solar Farm</h1>
             <p class="designer-copy">
                 Bring revenue, operating cost, debt, and return analytics into a cleaner executive shell
                 with a presentation-ready workbook designed for sponsors, lenders, and investment committees.
